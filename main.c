@@ -136,13 +136,72 @@ void ctx_print_unlocked(ctx_t *ctx) {
   double dt = MAX(1, effective_time) / 1000.0;
   double speed = ctx->k_checked / dt / 1000000;
   
-  // Format current key as hex string (show first 16 chars)
-  char key_hex[17];
-  snprintf(key_hex, sizeof(key_hex), "%016llx", ctx->range_s[3]);
+  // Matrix-style display with multiple keys
+  static int first_print = 1;
+  static int update_count = 0;
   
-  printf("\rKey: %s... | Speed: %.2f MKeys/s | Total: %llu%s", 
-         key_hex, speed, (unsigned long long)ctx->k_checked,
-         ctx->finished ? "\n" : "");
+  // Clear screen on first print
+  if (first_print) {
+    printf("\033[2J\033[H"); // Clear screen and move to top
+    printf("\033[1;32m"); // Green color for Matrix effect
+    printf("╔════════════════════════════════════════════════════════════════════╗\n");
+    printf("║           🔑 ECLOOP TRUERANDOM - MATRIX SCANNER 🔑                ║\n");
+    printf("╚════════════════════════════════════════════════════════════════════╝\n");
+    printf("\033[0m"); // Reset color
+    first_print = 0;
+  }
+  
+  // Generate multiple random-looking keys for display
+  fe display_keys[10];
+  for (int i = 0; i < 10; i++) {
+    fe_clone(display_keys[i], ctx->range_s);
+    // Add small increments to show different keys
+    u64 offset = (u64)i * 12345 + update_count * 67890;
+    display_keys[i][0] += offset;
+    if (display_keys[i][0] < offset) { // Handle overflow
+      display_keys[i][1]++;
+    }
+  }
+  
+  // Move cursor to line 4 and display keys
+  printf("\033[4;1H"); // Move to line 4
+  printf("\033[1;36m"); // Cyan color
+  printf("╔════════════════════════════════════════════════════════════════════╗\n");
+  printf("\033[0m"); // Reset color
+  
+  for (int i = 0; i < 10; i++) {
+    char key_hex[65];
+    snprintf(key_hex, sizeof(key_hex), "%016llx%016llx%016llx%016llx", 
+             display_keys[i][3], display_keys[i][2], display_keys[i][1], display_keys[i][0]);
+    
+    // Alternate colors for visual effect
+    if (i % 2 == 0) {
+      printf("\033[1;32m"); // Bright green
+    } else {
+      printf("\033[0;32m"); // Normal green
+    }
+    printf("║ %s ║\n", key_hex);
+    printf("\033[0m"); // Reset color
+  }
+  
+  printf("\033[1;36m"); // Cyan color
+  printf("╚════════════════════════════════════════════════════════════════════╝\n");
+  printf("\033[0m"); // Reset color
+  
+  // Display stats
+  printf("\033[1;33m"); // Yellow color for stats
+  printf("┌────────────────────────────────────────────────────────────────────┐\n");
+  printf("│ Speed: \033[1;37m%8.2f\033[1;33m MKeys/s  │  Total: \033[1;37m%20llu\033[1;33m keys     │\n", 
+         speed, (unsigned long long)ctx->k_checked);
+  printf("└────────────────────────────────────────────────────────────────────┘\n");
+  printf("\033[0m"); // Reset color
+  
+  update_count++;
+  
+  if (ctx->finished) {
+    printf("\n");
+  }
+  
   fflush(stdout);
 }
 
@@ -162,7 +221,7 @@ void ctx_update(ctx_t *ctx, size_t k_checked) {
   size_t ts = tsnow();
 
   pthread_mutex_lock(&ctx->lock);
-  bool need_print = (ts - ctx->ts_printed) >= 100;
+  bool need_print = (ts - ctx->ts_printed) >= 50; // Update more frequently for matrix effect
   ctx->k_checked += k_checked;
   ctx->ts_updated = ts;
   if (need_print) {
@@ -186,7 +245,15 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
   pthread_mutex_lock(&ctx->lock);
 
   if (!ctx->quiet) {
-    printf("\rFOUND! %016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
+    // Clear area and show found key prominently
+    printf("\033[20;1H"); // Move to line 20
+    printf("\n");
+    printf("╔════════════════════════════════════════════════════════════════════╗\n");
+    printf("║                         🎯 KEY FOUND! 🎯                          ║\n");
+    printf("╠════════════════════════════════════════════════════════════════════╣\n");
+    printf("║ %016llx%016llx%016llx%016llx ║\n", pk[3], pk[2], pk[1], pk[0]);
+    printf("╚════════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
     fflush(stdout);
   }
 
@@ -198,7 +265,6 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
   }
 
   ctx->k_found += 1;
-  ctx_print_unlocked(ctx);
 
   pthread_mutex_unlock(&ctx->lock);
 }
