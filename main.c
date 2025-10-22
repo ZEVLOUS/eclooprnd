@@ -66,6 +66,10 @@ typedef struct ctx_t {
   bool has_seed;
   u32 ord_offs; // offset (order) of range to search
   u32 ord_size; // size (span) in range to search
+  
+  // KeyHunt-style pure random view
+  char sample_key[67]; // 0x + 64 hex chars + null terminator
+  bool pure_random_view; // true when in pure random mode (-d 0:0)
 } ctx_t;
 
 void load_filter(ctx_t *ctx, const char *filepath) {
@@ -136,16 +140,55 @@ void ctx_print_unlocked(ctx_t *ctx) {
   double dt = MAX(1, effective_time) / 1000.0;
   double speed = ctx->k_checked / dt / 1000000;
   
-  // Matrix-style display with multiple keys
   static int first_print = 1;
+  
+  // KeyHunt-style Pure Random View (optimized for Termux)
+  if (ctx->pure_random_view) {
+    if (first_print) {
+      printf("\033[2J\033[H"); // Clear screen once
+      printf("\n");
+      printf("  ╔═══════════════════════════════════════════════════════════════════╗\n");
+      printf("  ║           \033[1;32mKeyHunt-Style Pure Random Scanner\033[0m                    ║\n");
+      printf("  ╠═══════════════════════════════════════════════════════════════════╣\n");
+      printf("  ║                                                                   ║\n");
+      printf("  ║  Random Key: \033[1;33m0x0000000000000000000000000000000000000000\033[0m  ║\n");
+      printf("  ║              \033[1;33m0000000000000000000000000000\033[0m                  ║\n");
+      printf("  ║                                                                   ║\n");
+      printf("  ╠═══════════════════════════════════════════════════════════════════╣\n");
+      printf("  ║  Speed:           0.00 MKeys/s                                    ║\n");
+      printf("  ║  Total Keys:      0                                               ║\n");
+      printf("  ╚═══════════════════════════════════════════════════════════════════╝\n");
+      printf("\n");
+      first_print = 0;
+    }
+    
+    // Update live key on display (single line update for smooth Termux performance)
+    printf("\033[5;15H"); // Move to key position (line 5, column 15)
+    printf("\033[1;33m%s\033[0m", ctx->sample_key);
+    
+    // Update stats
+    printf("\033[9;19H"); // Speed line
+    printf("\033[1;37m%8.2f\033[0m MKeys/s", speed);
+    
+    printf("\033[10;19H"); // Total keys line
+    printf("\033[1;37m%-20llu\033[0m", (unsigned long long)ctx->k_checked);
+    
+    if (ctx->finished) {
+      printf("\n\n");
+    }
+    
+    fflush(stdout);
+    return;
+  }
+  
+  // Matrix-style display (original multi-key view)
   static int update_count = 0;
   
-  // Clear screen on first print
   if (first_print) {
     printf("\033[2J\033[H"); // Clear screen and move to top
     printf("\033[1;32m"); // Green color for Matrix effect
     printf("╔════════════════════════════════════════════════════════════════════╗\n");
-    printf("║           🔑 ECLOOP TRUERANDOM - MATRIX SCANNER 🔑                ║\n");
+    printf("║              ECLOOP TRUERANDOM - MATRIX SCANNER                    ║\n");
     printf("╚════════════════════════════════════════════════════════════════════╝\n");
     printf("\033[0m"); // Reset color
     first_print = 0;
@@ -221,6 +264,14 @@ void ctx_update(ctx_t *ctx, size_t k_checked) {
   size_t ts = tsnow();
 
   pthread_mutex_lock(&ctx->lock);
+  
+  // Update sample key for KeyHunt-style view
+  if (ctx->pure_random_view) {
+    snprintf(ctx->sample_key, sizeof(ctx->sample_key), 
+             "0x%016llx%016llx%016llx%016llx", 
+             ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
+  }
+  
   bool need_print = (ts - ctx->ts_printed) >= 50; // Update more frequently for matrix effect
   ctx->k_checked += k_checked;
   ctx->ts_updated = ts;
@@ -245,15 +296,28 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
   pthread_mutex_lock(&ctx->lock);
 
   if (!ctx->quiet) {
-    // Clear area and show found key prominently
-    printf("\033[20;1H"); // Move to line 20
-    printf("\n");
-    printf("╔════════════════════════════════════════════════════════════════════╗\n");
-    printf("║                         🎯 KEY FOUND! 🎯                          ║\n");
-    printf("╠════════════════════════════════════════════════════════════════════╣\n");
-    printf("║ %016llx%016llx%016llx%016llx ║\n", pk[3], pk[2], pk[1], pk[0]);
-    printf("╚════════════════════════════════════════════════════════════════════╝\n");
-    printf("\n");
+    if (ctx->pure_random_view) {
+      // KeyHunt-style found key display
+      printf("\033[12;1H"); // Move below the box
+      printf("\n");
+      printf("  \033[1;32m╔═══════════════════════════════════════════════════════════════════╗\033[0m\n");
+      printf("  \033[1;32m║                          KEY FOUND!                               ║\033[0m\n");
+      printf("  \033[1;32m╠═══════════════════════════════════════════════════════════════════╣\033[0m\n");
+      printf("  \033[1;32m║\033[0m  \033[1;33m0x%016llx%016llx%016llx%016llx\033[0m  \033[1;32m║\033[0m\n", 
+             pk[3], pk[2], pk[1], pk[0]);
+      printf("  \033[1;32m╚═══════════════════════════════════════════════════════════════════╝\033[0m\n");
+      printf("\n");
+    } else {
+      // Original Matrix-style display
+      printf("\033[20;1H"); // Move to line 20
+      printf("\n");
+      printf("╔════════════════════════════════════════════════════════════════════╗\n");
+      printf("║                          KEY FOUND!                                ║\n");
+      printf("╠════════════════════════════════════════════════════════════════════╣\n");
+      printf("║ %016llx%016llx%016llx%016llx ║\n", pk[3], pk[2], pk[1], pk[0]);
+      printf("╚════════════════════════════════════════════════════════════════════╝\n");
+      printf("\n");
+    }
     fflush(stdout);
   }
 
@@ -928,6 +992,13 @@ void init(ctx_t *ctx, args_t *args) {
   arg_search_range(args, ctx->range_s, ctx->range_e);
   load_offs_size(ctx, args);
   queue_init(&ctx->queue, ctx->threads_count * 3);
+
+  // Enable KeyHunt-style view for pure random mode (-d 0:0)
+  ctx->pure_random_view = (ctx->ord_size == 0 && ctx->cmd == CMD_RND);
+  
+  // Initialize sample_key
+  snprintf(ctx->sample_key, sizeof(ctx->sample_key), 
+           "0x0000000000000000000000000000000000000000000000000000000000000000");
 
   // Silent mode - no initialization output
   
