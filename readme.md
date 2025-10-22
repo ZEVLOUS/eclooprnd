@@ -1,4 +1,4 @@
-## ecloopBINKOZ
+## eclooprnd
 
 A high-performance, CPU-optimized tool for computing public keys on the secp256k1 elliptic curve. It includes features for searching both compressed and uncompressed public keys, with customizable search parameters. Discuss on [bitcointalk.org](https://bitcointalk.org/index.php?topic=5544649.0).
 
@@ -20,7 +20,7 @@ A high-performance, CPU-optimized tool for computing public keys on the secp256k
 ## Build
 
 ```sh
-git clone https://github.com/ZEVLOUS/eclooptruerandom.git && cd ecloop
+git clone https://github.com/ZEVLOUS/eclooprnd.git && cd ecloop
 make build
 ```
 
