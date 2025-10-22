@@ -132,15 +132,18 @@ void load_filter(ctx_t *ctx, const char *filepath) {
 
 // note: this function is not thread-safe; use mutex lock before calling
 void ctx_print_unlocked(ctx_t *ctx) {
-  char *msg = ctx->finished ? "" : (ctx->paused ? " ('r' – resume)" : " ('p' – pause)");
-
   int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
   double dt = MAX(1, effective_time) / 1000.0;
-  double it = ctx->k_checked / dt / 1000000;
-  term_clear_line();
-  fprintf(stderr, "%.2fs ~ %.2f Mkeys/s ~ %'zu / %'zu%s%c", //
-          dt, it, ctx->k_found, ctx->k_checked, msg, ctx->finished ? '\n' : '\r');
-  fflush(stderr);
+  double speed = ctx->k_checked / dt / 1000000;
+  
+  // Format current key as hex string (show first 16 chars)
+  char key_hex[17];
+  snprintf(key_hex, sizeof(key_hex), "%016llx", ctx->range_s[3]);
+  
+  printf("\rKey: %s... | Speed: %.2f MKeys/s | Total: %llu%s", 
+         key_hex, speed, (unsigned long long)ctx->k_checked,
+         ctx->finished ? "\n" : "");
+  fflush(stdout);
 }
 
 void ctx_print_status(ctx_t *ctx) {
@@ -183,10 +186,8 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
   pthread_mutex_lock(&ctx->lock);
 
   if (!ctx->quiet) {
-    term_clear_line();
-    printf("%s: %08x%08x%08x%08x%08x <- %016llx%016llx%016llx%016llx\n", //
-           label, hash[0], hash[1], hash[2], hash[3], hash[4],           //
-           pk[3], pk[2], pk[1], pk[0]);
+    printf("\rFOUND! %016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
+    fflush(stdout);
   }
 
   if (ctx->outfile != NULL) {
@@ -578,6 +579,22 @@ void cmd_mul(ctx_t *ctx) {
 // MARK: CMD_RND
 
 void gen_random_range(ctx_t *ctx, const fe a, const fe b) {
+  // Pure random mode: generate small chunk around random key for thread distribution
+  if (ctx->ord_size == 0) {
+    fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
+    fe_clone(ctx->range_e, ctx->range_s);
+    
+    // Create a small range for thread distribution (threads_count * job_size)
+    fe chunk_size;
+    fe_set64(chunk_size, ctx->threads_count * ctx->job_size);
+    fe_modn_add(ctx->range_e, ctx->range_s, chunk_size);
+    
+    // Keep within bounds
+    if (fe_cmp(ctx->range_e, b) > 0) fe_clone(ctx->range_e, b);
+    return;
+  }
+
+  // Chunked random mode: generate random base with dynamic bits
   fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
   fe_clone(ctx->range_e, ctx->range_s);
   for (u32 i = ctx->ord_offs; i < (ctx->ord_offs + ctx->ord_size); ++i) {
@@ -618,8 +635,8 @@ void print_range_mask(fe range_s, u32 bits_size, u32 offset, bool use_color) {
 
 void cmd_rnd(ctx_t *ctx) {
   ctx->ord_offs = MIN(ctx->ord_offs, 255 - ctx->ord_size);
-  printf("[RANDOM MODE] offs: %d ~ bits: %d\n\n", ctx->ord_offs, ctx->ord_size);
-
+  // Silent mode - no header output
+  
   ctx_precompute_gpoints(ctx);
   ctx->job_size = MAX_JOB_SIZE;
   ctx->ts_started = tsnow(); // actual start time
@@ -628,15 +645,9 @@ void cmd_rnd(ctx_t *ctx) {
   fe_clone(range_s, ctx->range_s);
   fe_clone(range_e, ctx->range_e);
 
-  size_t last_c = 0, last_f = 0, s_time = 0;
   while (true) {
-    last_c = ctx->k_checked;
-    last_f = ctx->k_found;
-    s_time = tsnow();
-
     gen_random_range(ctx, range_s, range_e);
-    print_range_mask(ctx->range_s, ctx->ord_size, ctx->ord_offs, ctx->use_color);
-    print_range_mask(ctx->range_e, ctx->ord_size, ctx->ord_offs, ctx->use_color);
+    // Silent mode - no range printing
     ctx_print_status(ctx);
 
     // if full range is used, skip break after first iteration
@@ -650,11 +661,8 @@ void cmd_rnd(ctx_t *ctx) {
       pthread_join(ctx->threads[i], NULL);
     }
 
-    size_t dc = ctx->k_checked - last_c, df = ctx->k_found - last_f;
-    double dt = MAX((tsnow() - s_time), 1ul) / 1000.0;
-    term_clear_line();
-    printf("%'zu / %'zu ~ %.1fs\n\n", df, dc, dt);
-
+    // Silent mode - no iteration stats
+    
     if (is_full) break;
   }
 
@@ -736,8 +744,16 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
     exit(1);
   }
 
+  // Allow bits == 0 for pure random mode, otherwise enforce MIN_SIZE
+  if (tmp_size == 0) {
+    // Pure random mode: -d 0:0
+    ctx->ord_offs = 0;
+    ctx->ord_size = 0;
+    return;
+  }
+
   if (tmp_size < MIN_SIZE || tmp_size > MAX_SIZE) {
-    fprintf(stderr, "invalid size, min is %d and max is %d\n", MIN_SIZE, MAX_SIZE);
+    fprintf(stderr, "invalid size, min is %d and max is %d (or 0 for pure random mode)\n", MIN_SIZE, MAX_SIZE);
     exit(1);
   }
 
@@ -761,6 +777,7 @@ void usage(const char *name) {
   printf("  -a <addr_type>  - address type to search: c - addr33, u - addr65 (default: c)\n");
   printf("  -r <range>      - search range in hex format (example: 8000:ffff, default all)\n");
   printf("  -d <offs:size>  - bit offset and size for search (example: 128:32, default: 0:32)\n");
+  printf("                    use -d 0:0 for pure random mode (no chunking)\n");
   printf("  -q              - quiet mode (no output to stdout; -o required)\n");
   printf("  -endo           - use endomorphism (default: false)\n");
   printf("\nOther commands:\n");
@@ -846,22 +863,11 @@ void init(ctx_t *ctx, args_t *args) {
   load_offs_size(ctx, args);
   queue_init(&ctx->queue, ctx->threads_count * 3);
 
-  printf("threads: %zu ~ addr33: %d ~ addr65: %d ~ endo: %d | filter: ", //
-         ctx->threads_count, ctx->check_addr33, ctx->check_addr65, ctx->use_endo);
-
-  if (ctx->to_find_hashes != NULL) printf("list (%'zu)\n", ctx->to_find_count);
-  else printf("bloom\n");
-
-  if (ctx->cmd == CMD_ADD) {
-    fe_print("range_s", ctx->range_s);
-    fe_print("range_e", ctx->range_e);
-  }
-
+  // Silent mode - no initialization output
+  
   if (ctx->cmd == CMD_MUL) {
     ctx->raw_text = args_bool(args, "-raw");
   }
-
-  printf("----------------------------------------\n");
 }
 
 void handle_sigint(int sig) {
