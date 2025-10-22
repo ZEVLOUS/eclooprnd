@@ -6,6 +6,7 @@ A high-performance, CPU-optimized tool for computing public keys on the secp256k
 
 ## Features
 
+- Added true random mode -d 0:0 
 - Fixed 256-bit modular arithmetic
 - Group inversion for point addition operations
 - Precomputed tables for point multiplication
