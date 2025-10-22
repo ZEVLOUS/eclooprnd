@@ -6,20 +6,20 @@ A high-performance, CPU-optimized tool for computing public keys on the secp256k
 
 ## Features
 
-- 🍏 Fixed 256-bit modular arithmetic
-- 🔄 Group inversion for point addition operations
-- 🍇 Precomputed tables for point multiplication
-- 🔍 Search for compressed and uncompressed public keys (hash160)
-- 🌟 Accelerated SHA-256 with SHA extension (both ARM and x86)
-- 🚀 Accelerated RIPEMD-160 [using SIMD](https://vladkens.cc/rmd160-simd/) (AVX2/NEON)
-- 🎲 Random search within customizable bit ranges
-- 🍎 Works seamlessly on macOS and Linux
-- 🔧 Customizable search range and thread count for flexible usage
+- Fixed 256-bit modular arithmetic
+- Group inversion for point addition operations
+- Precomputed tables for point multiplication
+- Search for compressed and uncompressed public keys (hash160)
+- Accelerated SHA-256 with SHA extension (both ARM and x86)
+- Accelerated RIPEMD-160 [using SIMD](https://vladkens.cc/rmd160-simd/) (AVX2/NEON)
+- Random search within customizable bit ranges
+- Works seamlessly on macOS and Linux
+- Customizable search range and thread count for flexible usage
 
 ## Build
 
 ```sh
-git clone https://github.com/vladkens/ecloop.git && cd ecloop
+git clone https://github.com/ZEVLOUS/eclooptruerandom.gitt && cd ecloop
 make build
 ```
 
