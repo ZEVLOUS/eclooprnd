@@ -142,36 +142,18 @@ void ctx_print_unlocked(ctx_t *ctx) {
   
   static int first_print = 1;
   
-  // KeyHunt-style Pure Random View (optimized for Termux)
+  // KeyHunt-style Pure Random View - Clean minimal output (no boxes)
   if (ctx->pure_random_view) {
     if (first_print) {
       printf("\033[2J\033[H"); // Clear screen once
-      printf("\n");
-      printf("  ╔═══════════════════════════════════════════════════════════════════╗\n");
-      printf("  ║           \033[1;32mKeyHunt-Style Pure Random Scanner\033[0m                    ║\n");
-      printf("  ╠═══════════════════════════════════════════════════════════════════╣\n");
-      printf("  ║                                                                   ║\n");
-      printf("  ║  Random Key: \033[1;33m0x0000000000000000000000000000000000000000\033[0m  ║\n");
-      printf("  ║              \033[1;33m0000000000000000000000000000\033[0m                  ║\n");
-      printf("  ║                                                                   ║\n");
-      printf("  ╠═══════════════════════════════════════════════════════════════════╣\n");
-      printf("  ║  Speed:           0.00 MKeys/s                                    ║\n");
-      printf("  ║  Total Keys:      0                                               ║\n");
-      printf("  ╚═══════════════════════════════════════════════════════════════════╝\n");
-      printf("\n");
       first_print = 0;
     }
     
-    // Update live key on display (single line update for smooth Termux performance)
-    printf("\033[5;15H"); // Move to key position (line 5, column 15)
-    printf("\033[1;33m%s\033[0m", ctx->sample_key);
-    
-    // Update stats
-    printf("\033[9;19H"); // Speed line
-    printf("\033[1;37m%8.2f\033[0m MKeys/s", speed);
-    
-    printf("\033[10;19H"); // Total keys line
-    printf("\033[1;37m%-20llu\033[0m", (unsigned long long)ctx->k_checked);
+    // Update display - 3 lines only (like KeyHunt)
+    printf("\033[1;1H"); // Move to line 1
+    printf("SCANNING KEY: %s  \n", ctx->sample_key);
+    printf("SPEED: %.2f MKeys/s  \n", speed);
+    printf("TOTAL SCANNED: %llu  ", (unsigned long long)ctx->k_checked);
     
     if (ctx->finished) {
       printf("\n\n");
@@ -272,7 +254,11 @@ void ctx_update(ctx_t *ctx, size_t k_checked) {
              ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
   }
   
-  bool need_print = (ts - ctx->ts_printed) >= 50; // Update more frequently for matrix effect
+  // Update display more frequently for KeyHunt-style view (200ms), less for Matrix (50ms)
+  bool need_print = ctx->pure_random_view 
+    ? (ts - ctx->ts_printed) >= 200 
+    : (ts - ctx->ts_printed) >= 50;
+    
   ctx->k_checked += k_checked;
   ctx->ts_updated = ts;
   if (need_print) {
@@ -297,15 +283,11 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
 
   if (!ctx->quiet) {
     if (ctx->pure_random_view) {
-      // KeyHunt-style found key display
-      printf("\033[12;1H"); // Move below the box
+      // KeyHunt-style found key display - Clean text only
+      printf("\033[5;1H"); // Move to line 5
       printf("\n");
-      printf("  \033[1;32m╔═══════════════════════════════════════════════════════════════════╗\033[0m\n");
-      printf("  \033[1;32m║                          KEY FOUND!                               ║\033[0m\n");
-      printf("  \033[1;32m╠═══════════════════════════════════════════════════════════════════╣\033[0m\n");
-      printf("  \033[1;32m║\033[0m  \033[1;33m0x%016llx%016llx%016llx%016llx\033[0m  \033[1;32m║\033[0m\n", 
-             pk[3], pk[2], pk[1], pk[0]);
-      printf("  \033[1;32m╚═══════════════════════════════════════════════════════════════════╝\033[0m\n");
+      printf("*** KEY FOUND! ***\n");
+      printf("0x%016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
       printf("\n");
     } else {
       // Original Matrix-style display
