@@ -747,47 +747,36 @@ void draw_matrix_scanner(ctx_t *ctx) {
     if (progress > 1.0) progress = 1.0;
   }
   
-  // Clear screen and move to top
+  // Clear screen
   printf("\033[2J\033[H");
   
-  // Header
-  printf("\033[1;36m╔════════════════════════════════════════════════════════════════════╗\n");
-  printf("║              KeyHunt-Style Bitcoin Key Scanner                    ║\n");
-  printf("╚════════════════════════════════════════════════════════════════════╝\033[0m\n\n");
-  
-  // Range info (compact)
-  printf("\033[1;33mRange:\033[0m \033[0;32m%016llx%016llx%016llx%016llx\033[0m → \033[0;32m%016llx%016llx%016llx%016llx\033[0m\n\n", 
+  // Range (minimal, one line)
+  printf("%016llx%016llx%016llx%016llx -> %016llx%016llx%016llx%016llx\n\n", 
          ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0],
          ctx->range_e[3], ctx->range_e[2], ctx->range_e[1], ctx->range_e[0]);
   
-  // MATRIX SCROLLING KEYS - THE MAIN FEATURE
-  printf("\033[1;32m▼ SCANNING KEYS (Live Matrix View):\033[0m\n");
-  printf("\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
-  
-  // Display scrolling matrix keys with fade effect
+  // Matrix scrolling keys - fade effect
   for (int i = 0; i < 10; i++) {
     if (strlen(ctx->matrix_keys[i]) > 0) {
-      // Fade from bright green (newest) to dim (oldest)
-      int color = 46 - (i * 2); // Bright green to dark green
+      int color = 46 - (i * 2);
       printf("\033[38;5;%dm%s\033[0m\n", color, ctx->matrix_keys[i]);
     } else {
       printf("\n");
     }
   }
   
-  printf("\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n");
+  printf("\n");
   
-  // Statistics
-  printf("\033[1;33mStatistics:\033[0m\n");
-  printf("  Keys/sec:       \033[1;32m%.2f MKey/s\033[0m\n", speed);
-  printf("  Total Scanned:  \033[1;37m%'llu keys\033[0m\n", (unsigned long long)ctx->k_checked);
-  printf("  Progress:       ");
+  // Stats (minimal)
+  printf("Keys/sec: %.2f MKey/s\n", speed);
+  printf("Total: %'llu keys\n", (unsigned long long)ctx->k_checked);
+  printf("Progress: ");
   draw_keyhunt_progress_bar(progress, 40);
   printf("\n");
-  printf("  Threads:        \033[1;35m%zu\033[0m  |  Found Keys: \033[1;31m%zu\033[0m\n", ctx->threads_count, ctx->k_found);
+  printf("Threads: %zu  |  Found: %zu\n", ctx->threads_count, ctx->k_found);
   
   if (ctx->finished) {
-    printf("\n\033[1;32m✓ Scan Complete!\033[0m\n");
+    printf("\nScan Complete!\n");
   }
   
   fflush(stdout);
