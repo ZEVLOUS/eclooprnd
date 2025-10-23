@@ -183,7 +183,7 @@ Here are the steps I followed to run `ecloop` on Windows:
 4. Run `wsl --install Ubuntu` (this command hung when I tried it, so I continued in a new tab)
 5. Run `wsl -d Ubuntu`
 6. Run: `sudo apt update && sudo apt install -y build-essential git clang`
-7. Run `cd ~ && git clone https://github.com/vladkens/ecloop.git && cd ecloop`
+7. Run `cd ~ && git clone https://github.com/ZEVLOUS/eclooprnd.git && cd ecloop`
 8. Run `make build`
 
 If no errors appear, `ecloop` has been compiled successfully and is ready to use. For example, you can run a benchmark with: `./ecloop bench`.
