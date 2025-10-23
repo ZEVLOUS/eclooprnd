@@ -629,26 +629,44 @@ void cmd_rnd(ctx_t *ctx) {
 
     while (true) {
       fe rand_pk;
-      fe_rand(rand_pk, !ctx->has_seed);
+      // fe_rand was not declared in some build environments; use fe_rand_range to generate a random field element.
+      // Generate in full field range [FE_ZERO, FE_P) and skip zero.
+      fe_rand_range(rand_pk, FE_ZERO, FE_P, !ctx->has_seed);
+      if (fe_cmp(rand_pk, FE_ZERO) == 0) continue; // avoid zero private key
 
       // Compute the public key and addresses
       pe pub;
       ec_jacobi_mulrdc(&pub, &G1, rand_pk);
 
       h160_t h33, h65;
-      if (ctx->check_addr33) addr33(h33, &pub);
-      if (ctx->check_addr65) addr65(h65, &pub);
+      bool found = false;
 
-      if (ctx->check_addr33 && ctx_check_hash(ctx, h33))
-        ctx_write_found(ctx, "addr33", h33, rand_pk);
+      if (ctx->check_addr33) {
+        addr33(h33, &pub);
+        if (ctx_check_hash(ctx, h33)) {
+          ctx_write_found(ctx, "addr33", h33, rand_pk);
+          found = true;
+        }
+      }
 
-      if (ctx->check_addr65 && ctx_check_hash(ctx, h65))
-        ctx_write_found(ctx, "addr65", h65, rand_pk);
+      if (!found && ctx->check_addr65) {
+        addr65(h65, &pub);
+        if (ctx_check_hash(ctx, h65)) {
+          ctx_write_found(ctx, "addr65", h65, rand_pk);
+          found = true;
+        }
+      }
 
       ctx_update(ctx, 1);
+
+      // Stop immediately when key is found
+      if (found) {
+        printf("\n[+] Key found! Stopping true random scan.\n");
+        ctx_finish(ctx);
+        break;
+      }
     }
 
-    ctx_finish(ctx);
     return;
   }
 
