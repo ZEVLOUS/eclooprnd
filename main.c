@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+#include <stdbool.h>
 
 #include "lib/addr.c"
 #include "lib/bench.c"
@@ -24,6 +25,40 @@ enum Cmd { CMD_NIL, CMD_ADD, CMD_MUL, CMD_RND };
 
 // Global flag for immediate stop when key found
 static volatile bool global_key_found = false;
+
+// Random number generation functions
+void fe_rand(fe x, bool use_entropy) {
+    for (int i = 0; i < 4; i++) {
+        x[i] = rand64(use_entropy);
+    }
+    // Ensure it's less than the field order
+    while (fe_cmp(x, FE_P) >= 0) {
+        for (int i = 0; i < 4; i++) {
+            x[i] = rand64(use_entropy);
+        }
+    }
+}
+
+void fe_rand_range(fe x, const fe a, const fe b, bool use_entropy) {
+    fe diff;
+    fe_modn_sub(diff, b, a);
+    
+    // Generate random number in the range
+    do {
+        fe_rand(x, use_entropy);
+    } while (fe_cmp(x, diff) > 0);
+    
+    fe_modn_add(x, x, a);
+}
+
+u32 fe_bitlen(const fe x) {
+    for (int i = 3; i >= 0; i--) {
+        if (x[i] != 0) {
+            return (i * 64) + (64 - __builtin_clzll(x[i]));
+        }
+    }
+    return 0;
+}
 
 typedef struct ctx_t {
     enum Cmd cmd;
