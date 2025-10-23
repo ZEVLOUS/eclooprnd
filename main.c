@@ -26,10 +26,10 @@ enum Cmd { CMD_NIL, CMD_ADD, CMD_MUL, CMD_RND };
 // Global flag for immediate stop when key found
 static volatile bool global_key_found = false;
 
-// Remove duplicate function definitions - they're already in lib/utils.c and lib/ecc.c
-// fe_rand() is in lib/utils.c
-// fe_rand_range() is in lib/utils.c  
-// fe_bitlen() is in lib/ecc.c
+// Function declarations for functions defined in lib/utils.c and lib/ecc.c
+void fe_rand(fe x, bool use_entropy);
+void fe_rand_range(fe x, const fe a, const fe b, bool use_entropy);
+size_t fe_bitlen(const fe x);
 
 typedef struct ctx_t {
     enum Cmd cmd;
