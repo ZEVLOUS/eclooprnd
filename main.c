@@ -16,11 +16,20 @@
 #define MAX_JOB_SIZE 1024 * 1024 * 2
 #define GROUP_INV_SIZE 2048ul
 #define MAX_LINE_SIZE 1025
+#define PROGRESS_WIDTH 50
+#define MATRIX_COLUMNS 80
+#define MATRIX_ROWS 25
 
 static_assert(GROUP_INV_SIZE % HASH_BATCH_SIZE == 0,
               "GROUP_INV_SIZE must be divisible by HASH_BATCH_SIZE");
 
-enum Cmd { CMD_NIL, CMD_ADD, CMD_MUL, CMD_RND, CMD_SCAN };
+enum Cmd { CMD_NIL, CMD_ADD, CMD_MUL, CMD_RND };
+
+typedef struct {
+    char matrix[MATRIX_ROWS][MATRIX_COLUMNS];
+    int column_pos[MATRIX_COLUMNS];
+    bool matrix_initialized;
+} matrix_display_t;
 
 typedef struct ctx_t {
   enum Cmd cmd;
@@ -48,6 +57,12 @@ typedef struct ctx_t {
   size_t ts_paused_at; // timestamp when paused
   size_t paused_time;  // time spent in paused state
 
+  // Progress display fields
+  matrix_display_t matrix_disp;
+  size_t total_keys;
+  size_t keys_checked;
+  double progress_percent;
+
   // filter file (bloom filter or hashes to search)
   h160_t *to_find_hashes;
   size_t to_find_count;
@@ -69,14 +84,106 @@ typedef struct ctx_t {
   bool has_seed;
   u32 ord_offs; // offset (order) of range to search
   u32 ord_size; // size (span) in range to search
-
-  // cmd scan (custom scanner)
-  bool stop_on_found;
-  char matrix_keys[10][65]; // Matrix-style scrolling keys display
-  int matrix_index;
-  size_t scan_total_range;
-  char target_address[64];
 } ctx_t;
+
+void init_matrix_display(ctx_t *ctx) {
+    ctx->matrix_disp.matrix_initialized = false;
+    memset(ctx->matrix_disp.matrix, ' ', sizeof(ctx->matrix_disp.matrix));
+    memset(ctx->matrix_disp.column_pos, 0, sizeof(ctx->matrix_disp.column_pos));
+}
+
+void update_matrix_display(ctx_t *ctx) {
+    if (!ctx->matrix_disp.matrix_initialized) {
+        // Initialize matrix with random characters
+        for (int i = 0; i < MATRIX_ROWS; i++) {
+            for (int j = 0; j < MATRIX_COLUMNS; j++) {
+                ctx->matrix_disp.matrix[i][j] = rand() % 2 ? '0' + rand() % 10 : 'A' + rand() % 6;
+            }
+        }
+        ctx->matrix_disp.matrix_initialized = true;
+    }
+
+    // Update some random columns with new hex characters
+    for (int i = 0; i < 5; i++) {
+        int col = rand() % MATRIX_COLUMNS;
+        ctx->matrix_disp.column_pos[col] = (ctx->matrix_disp.column_pos[col] + 1) % MATRIX_ROWS;
+        
+        for (int row = 0; row < MATRIX_ROWS; row++) {
+            if (row == ctx->matrix_disp.column_pos[col]) {
+                ctx->matrix_disp.matrix[row][col] = rand() % 2 ? '0' + rand() % 10 : 'A' + rand() % 6;
+            }
+        }
+    }
+}
+
+void draw_progress_screen(ctx_t *ctx) {
+    if (ctx->quiet) return;
+    
+    fprintf(stderr, "\033[H\033[J"); // Clear screen
+    fprintf(stderr, "┌─────────────────────────────────────┐\n");
+    fprintf(stderr, "│   Custom Bitcoin Range Scanner      │\n");
+    fprintf(stderr, "├─────────────────────────────────────┤\n");
+    fprintf(stderr, "│                                     │\n");
+    
+    // Display current key being checked
+    char current_key[65];
+    snprintf(current_key, sizeof(current_key), "%016llx%016llx%016llx%016llx", 
+             ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
+    fprintf(stderr, "│ Current Key:                        │\n");
+    fprintf(stderr, "│ %.16s...%.16s             │\n", current_key, current_key + 48);
+    
+    fprintf(stderr, "│                                     │\n");
+    
+    // Progress bar
+    int progress_width = PROGRESS_WIDTH - 2;
+    int filled = (int)(ctx->progress_percent * progress_width / 100.0);
+    fprintf(stderr, "│ Progress: [");
+    for (int i = 0; i < progress_width; i++) {
+        fprintf(stderr, "%s", i < filled ? "█" : "░");
+    }
+    fprintf(stderr, "] %5.1f%% │\n", ctx->progress_percent);
+    
+    fprintf(stderr, "│                                     │\n");
+    
+    // Statistics
+    int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
+    int hours = effective_time / 3600000;
+    int minutes = (effective_time % 3600000) / 60000;
+    int seconds = (effective_time % 60000) / 1000;
+    
+    double speed = ctx->k_checked / MAX(1, effective_time) / 1000.0;
+    
+    fprintf(stderr, "│ Status: %-27s │\n", ctx->paused ? "PAUSED" : "Searching...");
+    fprintf(stderr, "│ Speed: %-28.2f MKeys/s │\n", speed);
+    fprintf(stderr, "│ Checked: %-25zu │\n", ctx->k_checked);
+    fprintf(stderr, "│ Found: %-27zu │\n", ctx->k_found);
+    fprintf(stderr, "│ Time: %02d:%02d:%02d                          │\n", hours, minutes, seconds);
+    fprintf(stderr, "│                                     │\n");
+    
+    // Matrix display section
+    fprintf(stderr, "├─────────────────────────────────────┤\n");
+    fprintf(stderr, "│          Matrix Display             │\n");
+    fprintf(stderr, "│                                     │\n");
+    
+    // Show a portion of the matrix
+    for (int i = 0; i < 8 && i < MATRIX_ROWS; i++) {
+        fprintf(stderr, "│ ");
+        for (int j = 0; j < 40 && j < MATRIX_COLUMNS; j++) {
+            if (ctx->matrix_disp.matrix_initialized) {
+                fprintf(stderr, "%c", ctx->matrix_disp.matrix[i][j]);
+            } else {
+                fprintf(stderr, "%c", '0' + rand() % 10);
+            }
+        }
+        fprintf(stderr, " %29s │\n", "");
+    }
+    
+    fprintf(stderr, "│                                     │\n");
+    fprintf(stderr, "│ [S]top  [P]ause  [R]esume  [Q]uit   │\n");
+    fprintf(stderr, "└─────────────────────────────────────┘\n");
+    
+    fflush(stderr);
+}
 
 void load_filter(ctx_t *ctx, const char *filepath) {
   if (!filepath) {
@@ -140,43 +247,22 @@ void load_filter(ctx_t *ctx, const char *filepath) {
   for (size_t i = 0; i < ctx->to_find_count; ++i) blf_add(&ctx->blf, hashes + i * 5);
 }
 
-// note: this function is not thread-safe; use mutex lock before calling
 void ctx_print_unlocked(ctx_t *ctx) {
-  // Only thread 0 prints in pure random mode
-  if (ctx->pure_random_view && ctx->tid != 0) return;
-  
-  int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
-  double dt = MAX(1, effective_time) / 1000.0;
-  double speed = ctx->k_checked / dt / 1000000;
-  
-  // KeyHunt-style Pure Random View - Clean minimal output
-  if (ctx->pure_random_view && !ctx->quiet) {
-    static const char spin[4] = {'|', '/', '-', '\\'};
-    static int si = 0;
+    // Only thread 0 prints
+    if (ctx->tid != 0) return;
     
-    fprintf(stderr, "\033[H\033[J"); // Clear terminal
-    fprintf(stderr, "SCANNING KEY: %s %c\n", ctx->sample_key, spin[si]);
-    fprintf(stderr, "SPEED: %.2f MKeys/s\n", speed);
-    fprintf(stderr, "TOTAL SCANNED: %zu\n", ctx->k_checked);
-    fflush(stderr);
-    si = (si + 1) & 3;
+    // Use new progress screen for all modes
+    update_matrix_display(ctx);
     
-    if (ctx->finished) {
-      fprintf(stderr, "\n");
+    // Calculate progress percentage
+    if (ctx->total_keys > 0) {
+        ctx->progress_percent = (double)ctx->keys_checked * 100.0 / (double)ctx->total_keys;
+    } else {
+        ctx->progress_percent = 0.0;
     }
     
-    return;
-  }
-  
-  // Default view for other modes
-  if (!ctx->quiet) {
-    char key_hex[17];
-    snprintf(key_hex, sizeof(key_hex), "%016llx", ctx->range_s[3]);
-    printf("\rKey: %s... | Speed: %.2f MKeys/s | Total: %llu%s", 
-           key_hex, speed, (unsigned long long)ctx->k_checked,
-           ctx->finished ? "\n" : "");
-    fflush(stdout);
-  }
+    // Use the new progress screen
+    draw_progress_screen(ctx);
 }
 
 void ctx_print_status(ctx_t *ctx) {
@@ -196,21 +282,12 @@ void ctx_update(ctx_t *ctx, size_t k_checked) {
 
   pthread_mutex_lock(&ctx->lock);
   
-  // Update sample key for KeyHunt-style view (every update)
-  if (ctx->pure_random_view) {
-    snprintf(ctx->sample_key, sizeof(ctx->sample_key), 
-             "%016llx%016llx%016llx%016llx", 
-             ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
-  }
-  
-  // Update display every 20ms for KeyHunt view (smooth), 50ms for others
-  bool need_print = ctx->pure_random_view 
-    ? (ts - ctx->ts_printed) >= 20 
-    : (ts - ctx->ts_printed) >= 50;
-    
   ctx->k_checked += k_checked;
+  ctx->keys_checked = ctx->k_checked; // For progress calculation
   ctx->ts_updated = ts;
-  if (need_print) {
+  
+  // Update display every 100ms for smooth animation
+  if ((ts - ctx->ts_printed) >= 100) {
     ctx->ts_printed = ts;
     ctx_print_unlocked(ctx);
   }
@@ -724,345 +801,6 @@ void cmd_rnd(ctx_t *ctx) {
   ctx_finish(ctx);
 }
 
-// MARK: CMD_SCAN (Custom Bitcoin Range Scanner)
-
-void draw_progress_bar(double progress, int width) {
-  int filled = (int)(progress * width);
-  printf("│ Progress: [");
-  for (int i = 0; i < width; i++) {
-    if (i < filled) printf("█");
-    else printf("░");
-  }
-  printf("] %3.0f%%       │\n", progress * 100);
-}
-
-void format_time(size_t ms, char *buf) {
-  size_t seconds = ms / 1000;
-  size_t hours = seconds / 3600;
-  size_t minutes = (seconds % 3600) / 60;
-  size_t secs = seconds % 60;
-  sprintf(buf, "%02zu:%02zu:%02zu", hours, minutes, secs);
-}
-
-void update_matrix_keys(ctx_t *ctx, const fe pk) {
-  // Scroll matrix keys up
-  for (int i = 9; i > 0; i--) {
-    strcpy(ctx->matrix_keys[i], ctx->matrix_keys[i-1]);
-  }
-  
-  // Add new key at top with green color codes
-  snprintf(ctx->matrix_keys[0], 65, "%016llx%016llx%016llx%016llx", 
-           pk[3], pk[2], pk[1], pk[0]);
-  
-  ctx->matrix_index = (ctx->matrix_index + 1) % 10;
-}
-
-void draw_scanner_ui(ctx_t *ctx) {
-  int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
-  double dt = MAX(1, effective_time) / 1000.0;
-  double speed = ctx->k_checked / dt / 1000000;
-  
-  char time_str[16];
-  format_time(effective_time, time_str);
-  
-  double progress = 0.0;
-  if (ctx->scan_total_range > 0) {
-    progress = (double)ctx->k_checked / (double)ctx->scan_total_range;
-    if (progress > 1.0) progress = 1.0;
-  }
-  
-  // Clear screen and move to top
-  printf("\033[H\033[J");
-  
-  // Draw header
-  printf("┌─────────────────────────────────────────────────────────────┐\n");
-  printf("│          \033[1;36m⚡ Custom Bitcoin Range Scanner ⚡\033[0m             │\n");
-  printf("├─────────────────────────────────────────────────────────────┤\n");
-  
-  // Display range
-  char range_s_hex[65], range_e_hex[65];
-  snprintf(range_s_hex, 65, "%016llx%016llx%016llx%016llx", 
-           ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
-  snprintf(range_e_hex, 65, "%016llx%016llx%016llx%016llx", 
-           ctx->range_e[3], ctx->range_e[2], ctx->range_e[1], ctx->range_e[0]);
-  
-  printf("│                                                             │\n");
-  printf("│ Start HEX:                                                  │\n");
-  printf("│ \033[1;33m%s\033[0m │\n", range_s_hex);
-  printf("│                                                             │\n");
-  printf("│ End HEX:                                                    │\n");
-  printf("│ \033[1;33m%s\033[0m │\n", range_e_hex);
-  printf("│                                                             │\n");
-  
-  if (strlen(ctx->target_address) > 0) {
-    printf("│ Target Address:                                             │\n");
-    printf("│ \033[1;35m%-59s\033[0m │\n", ctx->target_address);
-    printf("│                                                             │\n");
-  }
-  
-  printf("│ Threads: \033[1;32m%-3zu\033[0m                                              │\n", ctx->threads_count);
-  printf("│                                                             │\n");
-  
-  // Matrix-style key display
-  printf("├─────────────────────────────────────────────────────────────┤\n");
-  printf("│ \033[1;32mScanning Keys (Matrix View):\033[0m                            │\n");
-  printf("├─────────────────────────────────────────────────────────────┤\n");
-  
-  for (int i = 0; i < 5; i++) {
-    if (strlen(ctx->matrix_keys[i]) > 0) {
-      // Fade effect - newer keys are brighter
-      int brightness = 32 + (5 - i) * 3;
-      printf("│ \033[38;5;%dm%s\033[0m │\n", brightness, ctx->matrix_keys[i]);
-    } else {
-      printf("│                                                             │\n");
-    }
-  }
-  
-  // Status section
-  printf("├─────────────────────────────────────────────────────────────┤\n");
-  printf("│ Status: \033[1;36m%-48s\033[0m │\n", 
-         ctx->finished ? "Completed!" : (ctx->paused ? "Paused" : "Searching..."));
-  printf("│ Speed:  \033[1;32m%-13.2f MKeys/s\033[0m                             │\n", speed);
-  printf("│ Checked: \033[1;33m%-15llu keys\033[0m                            │\n", 
-         (unsigned long long)ctx->k_checked);
-  printf("│ Found:  \033[1;31m%-3zu keys\033[0m                                          │\n", ctx->k_found);
-  printf("│ Time:   \033[1;37m%-11s\033[0m                                      │\n", time_str);
-  
-  draw_progress_bar(progress, 30);
-  
-  printf("└─────────────────────────────────────────────────────────────┘\n");
-  
-  if (ctx->finished) {
-    printf("\n");
-  }
-  
-  fflush(stdout);
-}
-
-void ctx_scan_update(ctx_t *ctx, size_t k_checked, const fe current_pk) {
-  size_t ts = tsnow();
-  
-  pthread_mutex_lock(&ctx->lock);
-  
-  update_matrix_keys(ctx, current_pk);
-  
-  ctx->k_checked += k_checked;
-  ctx->ts_updated = ts;
-  
-  // Update display every 100ms for smooth animation
-  if ((ts - ctx->ts_printed) >= 100) {
-    ctx->ts_printed = ts;
-    draw_scanner_ui(ctx);
-  }
-  
-  pthread_mutex_unlock(&ctx->lock);
-  
-  // Stop if key was found
-  if (ctx->stop_on_found && ctx->k_found > 0) {
-    pthread_mutex_lock(&ctx->lock);
-    ctx->finished = true;
-    pthread_mutex_unlock(&ctx->lock);
-  }
-  
-  ctx_check_paused(ctx);
-}
-
-void check_found_scan(ctx_t *ctx, fe const start_pk, const pe *points) {
-  h160_t hs33[HASH_BATCH_SIZE];
-  h160_t hs65[HASH_BATCH_SIZE];
-
-  for (size_t i = 0; i < GROUP_INV_SIZE; i += HASH_BATCH_SIZE) {
-    if (ctx->check_addr33) addr33_batch(hs33, points + i, HASH_BATCH_SIZE);
-    if (ctx->check_addr65) addr65_batch(hs65, points + i, HASH_BATCH_SIZE);
-    for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
-      if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, i + j, 0);
-      if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, i + j, 0);
-      
-      // Stop immediately if key found
-      if (ctx->stop_on_found && ctx->k_found > 0) {
-        return;
-      }
-    }
-  }
-
-  if (!ctx->use_endo) return;
-
-  size_t esize = HASH_BATCH_SIZE * 5;
-  pe endos[esize];
-  for (size_t i = 0; i < esize; ++i) fe_set64(endos[i].z, 1);
-
-  size_t ci = 0;
-  for (size_t k = 0; k < GROUP_INV_SIZE; ++k) {
-    size_t idx = (k * 5) % esize;
-
-    fe_clone(endos[idx + 0].x, points[k].x);
-    fe_modp_neg(endos[idx + 0].y, points[k].y);
-
-    fe_modp_mul(endos[idx + 1].x, points[k].x, B1);
-    fe_clone(endos[idx + 1].y, points[k].y);
-
-    fe_clone(endos[idx + 2].x, endos[idx + 1].x);
-    fe_clone(endos[idx + 2].y, endos[idx + 0].y);
-
-    fe_modp_mul(endos[idx + 3].x, points[k].x, B2);
-    fe_clone(endos[idx + 3].y, points[k].y);
-
-    fe_clone(endos[idx + 4].x, endos[idx + 3].x);
-    fe_clone(endos[idx + 4].y, endos[idx + 0].y);
-
-    bool is_full = (idx + 5) % esize == 0 || k == GROUP_INV_SIZE - 1;
-    if (!is_full) continue;
-
-    for (size_t i = 0; i < esize; i += HASH_BATCH_SIZE) {
-      if (ctx->check_addr33) addr33_batch(hs33, endos + i, HASH_BATCH_SIZE);
-      if (ctx->check_addr65) addr65_batch(hs65, endos + i, HASH_BATCH_SIZE);
-
-      for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
-        if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, ci / 5, (ci % 5) + 1);
-        if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, ci / 5, (ci % 5) + 1);
-        ci += 1;
-        
-        // Stop immediately if key found
-        if (ctx->stop_on_found && ctx->k_found > 0) {
-          return;
-        }
-      }
-    }
-  }
-
-  assert(ci == GROUP_INV_SIZE * 5);
-}
-
-void batch_scan(ctx_t *ctx, const fe pk, const size_t iterations) {
-  size_t hsize = GROUP_INV_SIZE / 2;
-
-  pe bp[GROUP_INV_SIZE];
-  fe dx[hsize];
-  pe GStart;
-  fe ck, rx, ry;
-  fe ss, dd;
-
-  fe_modn_add_stride(ss, pk, ctx->stride_k, hsize);
-  ec_jacobi_mulrdc(&GStart, &G1, ss);
-
-  fe_clone(ck, pk);
-
-  size_t counter = 0;
-  while (counter < iterations && !ctx->finished) {
-    for (size_t i = 0; i < hsize; ++i) fe_modp_sub(dx[i], ctx->gpoints[i].x, GStart.x);
-    fe_modp_grpinv(dx, hsize);
-
-    pe_clone(&bp[hsize + 0], &GStart);
-
-    for (size_t D = 0; D < 2; ++D) {
-      bool positive = D == 0;
-      size_t g_idx = positive ? 0 : hsize;
-      size_t g_max = positive ? hsize - 1 : hsize;
-      for (size_t i = 0; i < g_max; ++i) {
-        fe_modp_sub(ss, ctx->gpoints[g_idx + i].y, GStart.y);
-        fe_modp_mul(ss, ss, dx[i]);
-        fe_modp_sqr(rx, ss);
-        fe_modp_sub(rx, rx, GStart.x);
-        fe_modp_sub(rx, rx, ctx->gpoints[g_idx + i].x);
-        fe_modp_sub(dd, GStart.x, rx);
-        fe_modp_mul(dd, ss, dd);
-        fe_modp_sub(ry, dd, GStart.y);
-
-        size_t idx = positive ? hsize + i + 1 : hsize - 1 - i;
-        fe_clone(bp[idx].x, rx);
-        fe_clone(bp[idx].y, ry);
-        fe_set64(bp[idx].z, 0x1);
-      }
-    }
-
-    check_found_scan(ctx, ck, bp);
-    
-    // Update matrix display with current key
-    ctx_scan_update(ctx, GROUP_INV_SIZE, ck);
-    
-    // Stop if key found
-    if (ctx->stop_on_found && ctx->k_found > 0) {
-      break;
-    }
-    
-    fe_modn_add_stride(ck, ck, ctx->stride_k, GROUP_INV_SIZE);
-    ec_jacobi_addrdc(&GStart, &GStart, &ctx->stride_p);
-    counter += GROUP_INV_SIZE;
-  }
-}
-
-void *cmd_scan_worker(void *arg) {
-  ctx_t *ctx = (ctx_t *)arg;
-
-  fe initial_r;
-  fe_clone(initial_r, ctx->range_s);
-
-  fe inc = {0};
-  fe_set64(inc, ctx->job_size);
-  fe_modn_mul(inc, inc, ctx->stride_k);
-
-  fe pk;
-  while (!ctx->finished) {
-    pthread_mutex_lock(&ctx->lock);
-    bool is_overflow = fe_cmp(ctx->range_s, initial_r) < 0;
-    if (fe_cmp(ctx->range_s, ctx->range_e) >= 0 || is_overflow) {
-      pthread_mutex_unlock(&ctx->lock);
-      break;
-    }
-
-    fe_clone(pk, ctx->range_s);
-    fe_modn_add(ctx->range_s, ctx->range_s, inc);
-    pthread_mutex_unlock(&ctx->lock);
-
-    batch_scan(ctx, pk, ctx->job_size);
-    
-    // Stop if key found
-    if (ctx->stop_on_found && ctx->k_found > 0) {
-      break;
-    }
-  }
-
-  return NULL;
-}
-
-void cmd_scan(ctx_t *ctx) {
-  ctx->stop_on_found = true; // Always stop when key is found in scan mode
-  
-  // Initialize matrix display
-  for (int i = 0; i < 10; i++) {
-    ctx->matrix_keys[i][0] = '\0';
-  }
-  ctx->matrix_index = 0;
-  
-  // Calculate total range for progress bar
-  fe range_size;
-  fe_modn_sub(range_size, ctx->range_e, ctx->range_s);
-  ctx->scan_total_range = range_size[0]; // Approximate for progress
-  
-  ctx_precompute_gpoints(ctx);
-
-  fe_modn_sub(range_size, ctx->range_e, ctx->range_s);
-  ctx->job_size = fe_cmp64(range_size, MAX_JOB_SIZE) < 0 ? range_size[0] : MAX_JOB_SIZE;
-  ctx->ts_started = tsnow();
-
-  // Initial display
-  draw_scanner_ui(ctx);
-
-  for (size_t i = 0; i < ctx->threads_count; ++i) {
-    pthread_create(&ctx->threads[i], NULL, cmd_scan_worker, ctx);
-  }
-
-  for (size_t i = 0; i < ctx->threads_count; ++i) {
-    pthread_join(ctx->threads[i], NULL);
-  }
-
-  pthread_mutex_lock(&ctx->lock);
-  ctx->finished = true;
-  draw_scanner_ui(ctx);
-  if (ctx->outfile != NULL) fclose(ctx->outfile);
-  pthread_mutex_unlock(&ctx->lock);
-}
-
 // MARK: args helpers
 
 void arg_search_range(args_t *args, fe range_s, fe range_e) {
@@ -1164,7 +902,6 @@ void usage(const char *name) {
   printf("  add             - search in given range with batch addition\n");
   printf("  mul             - search hex encoded private keys (from stdin)\n");
   printf("  rnd             - search random range of bits in given range\n");
-  printf("  scan            - custom Bitcoin scanner with Matrix-style UI\n");
   printf("\nCompute options:\n");
   printf("  -f <file>       - filter file to search (list of hashes or bloom fitler)\n");
   printf("  -o <file>       - output file to write found keys (default: stdout)\n");
@@ -1200,7 +937,6 @@ void init(ctx_t *ctx, args_t *args) {
     if (strcmp(args->argv[1], "add") == 0) ctx->cmd = CMD_ADD;
     if (strcmp(args->argv[1], "mul") == 0) ctx->cmd = CMD_MUL;
     if (strcmp(args->argv[1], "rnd") == 0) ctx->cmd = CMD_RND;
-    if (strcmp(args->argv[1], "scan") == 0) ctx->cmd = CMD_SCAN;
   }
 
   if (ctx->cmd == CMD_NIL) {
@@ -1255,9 +991,22 @@ void init(ctx_t *ctx, args_t *args) {
   ctx->paused_time = 0;
   ctx->paused = false;
 
+  // Initialize matrix display and progress tracking
+  init_matrix_display(ctx);
+  ctx->total_keys = 0;
+  ctx->keys_checked = 0;
+  ctx->progress_percent = 0.0;
+
   arg_search_range(args, ctx->range_s, ctx->range_e);
   load_offs_size(ctx, args);
   queue_init(&ctx->queue, ctx->threads_count * 3);
+
+  // Calculate total keys for progress if in range mode
+  if (ctx->cmd == CMD_ADD || ctx->cmd == CMD_RND) {
+      fe range_size;
+      fe_modn_sub(range_size, ctx->range_e, ctx->range_s);
+      ctx->total_keys = range_size[0]; // Approximate total keys
+  }
 
   // Enable KeyHunt-style view for pure random mode (-d 0:0)
   ctx->pure_random_view = (ctx->ord_size == 0 && ctx->cmd == CMD_RND);
@@ -1272,12 +1021,6 @@ void init(ctx_t *ctx, args_t *args) {
   if (ctx->cmd == CMD_MUL) {
     ctx->raw_text = args_bool(args, "-raw");
   }
-  
-  // Initialize scan mode fields
-  ctx->target_address[0] = '\0';
-  ctx->stop_on_found = false;
-  ctx->matrix_index = 0;
-  ctx->scan_total_range = 0;
 }
 
 void handle_sigint(int sig) {
@@ -1288,19 +1031,32 @@ void handle_sigint(int sig) {
 }
 
 void tty_cb(void *ctx_raw, const char ch) {
-  ctx_t *ctx = (ctx_t *)ctx_raw;
+    ctx_t *ctx = (ctx_t *)ctx_raw;
 
-  if (ch == 'p' && !ctx->paused) {
-    ctx->ts_paused_at = tsnow();
-    ctx->paused = true;
-    ctx_print_status(ctx);
-  }
+    if (ch == 'p' || ch == 'P') {
+        if (!ctx->paused) {
+            ctx->ts_paused_at = tsnow();
+            ctx->paused = true;
+            ctx_print_status(ctx);
+        }
+    }
 
-  if (ch == 'r' && ctx->paused) {
-    ctx->paused_time += tsnow() - ctx->ts_paused_at;
-    ctx->paused = false;
+    if (ch == 'r' || ch == 'R') {
+        if (ctx->paused) {
+            ctx->paused_time += tsnow() - ctx->ts_paused_at;
+            ctx->paused = false;
+            ctx_print_status(ctx);
+        }
+    }
+    
+    if (ch == 's' || ch == 'S' || ch == 'q' || ch == 'Q') {
+        fprintf(stderr, "\nStopping scan...\n");
+        ctx_finish(ctx);
+        exit(0);
+    }
+    
+    // Force redraw on any key press
     ctx_print_status(ctx);
-  }
 }
 
 int main(int argc, const char **argv) {
@@ -1317,7 +1073,6 @@ int main(int argc, const char **argv) {
   if (ctx.cmd == CMD_ADD) cmd_add(&ctx);
   if (ctx.cmd == CMD_MUL) cmd_mul(&ctx);
   if (ctx.cmd == CMD_RND) cmd_rnd(&ctx);
-  if (ctx.cmd == CMD_SCAN) cmd_scan(&ctx);
 
   return 0;
 }
