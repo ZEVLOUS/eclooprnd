@@ -1006,17 +1006,17 @@ void init(ctx_t *ctx, args_t *args) {
   ctx->paused_time = 0;
   ctx->paused = false;
 
-  // Initialize matrix display BEFORE load_offs_size
+  arg_search_range(args, ctx->range_s, ctx->range_e);
+  load_offs_size(ctx, args);
+  queue_init(&ctx->queue, ctx->threads_count * 3);
+  
+  // Initialize matrix display
   ctx->pure_random_mode = false;
   ctx->matrix_index = 0;
   ctx->current_key[0] = '\0';
   for (int i = 0; i < 10; i++) {
     ctx->matrix_keys[i][0] = '\0';
   }
-
-  arg_search_range(args, ctx->range_s, ctx->range_e);
-  load_offs_size(ctx, args);  // This will set pure_random_mode if -d 0:0
-  queue_init(&ctx->queue, ctx->threads_count * 3);
 
   if (!ctx->pure_random_mode) {
     printf("threads: %zu ~ addr33: %d ~ addr65: %d ~ endo: %d | filter: ", //

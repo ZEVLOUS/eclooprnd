@@ -6,14 +6,13 @@
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
-#include <stdatomic.h>
 
 #include "lib/addr.c"
 #include "lib/bench.c"
 #include "lib/ecc.c"
 #include "lib/utils.c"
 
-#define VERSION "0.5.1-matrix"
+#define VERSION "0.5.0"
 #define MAX_JOB_SIZE 1024 * 1024 * 2
 #define GROUP_INV_SIZE 2048ul
 #define MAX_LINE_SIZE 1025
@@ -28,8 +27,11 @@ typedef struct ctx_t {
   pthread_mutex_t lock;
   size_t threads_count;
   pthread_t *threads;
-  _Atomic size_t k_checked;
-  _Atomic size_t k_found;
+  int tid;                     // thread index (0 = UI thread, others silent)
+  bool pure_random_view;       // KeyHunt-style view mode for -d 0:0
+  char sample_key[67];         // buffer for live random key (0x + 64 hex chars)
+  size_t k_checked;
+  size_t k_found;
   bool check_addr33;
   bool check_addr65;
   bool use_endo;
@@ -38,13 +40,13 @@ typedef struct ctx_t {
   bool quiet;
   bool use_color;
 
-  _Atomic bool finished;       // true if the program is exiting
-  bool paused;                  // true if the program is paused
-  size_t ts_started;            // timestamp of start
-  size_t ts_updated;            // timestamp of last update
-  size_t ts_printed;            // timestamp of last print
-  size_t ts_paused_at;          // timestamp when paused
-  size_t paused_time;           // time spent in paused state
+  bool finished;       // true if the program is exiting
+  bool paused;         // true if the program is paused
+  size_t ts_started;   // timestamp of start
+  size_t ts_updated;   // timestamp of last update
+  size_t ts_printed;   // timestamp of last print
+  size_t ts_paused_at; // timestamp when paused
+  size_t paused_time;  // time spent in paused state
 
   // filter file (bloom filter or hashes to search)
   h160_t *to_find_hashes;
@@ -67,12 +69,6 @@ typedef struct ctx_t {
   bool has_seed;
   u32 ord_offs; // offset (order) of range to search
   u32 ord_size; // size (span) in range to search
-  
-  // Matrix display
-  bool pure_random_mode;        // true for -d 0:0
-  char matrix_keys[10][65];     // Scrolling keys display
-  int matrix_index;
-  char current_key[65];
 } ctx_t;
 
 void load_filter(ctx_t *ctx, const char *filepath) {
@@ -137,79 +133,43 @@ void load_filter(ctx_t *ctx, const char *filepath) {
   for (size_t i = 0; i < ctx->to_find_count; ++i) blf_add(&ctx->blf, hashes + i * 5);
 }
 
-// Matrix-style display for pure random mode
-void draw_matrix_display(ctx_t *ctx) {
-  int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
-  double dt = MAX(1, effective_time) / 1000.0;
-  double speed = atomic_load(&ctx->k_checked) / dt / 1000000;
-  
-  // Clear screen and move cursor to top
-  printf("\033[2J\033[H");
-  
-  // Display current scanning key at top
-  if (strlen(ctx->current_key) > 0) {
-    printf("SCANNING KEY: %s\n\n", ctx->current_key);
-  } else {
-    printf("SCANNING KEY: initializing...\n\n");
-  }
-  
-  // Matrix scrolling keys with color fade
-  for (int i = 0; i < 10; i++) {
-    if (strlen(ctx->matrix_keys[i]) > 0) {
-      // Green color fade (bright to dim)
-      int color = 46 - (i * 2);
-      printf("\033[38;5;%dm%s\033[0m\n", color, ctx->matrix_keys[i]);
-    } else {
-      printf("\n");
-    }
-  }
-  
-  printf("\n");
-  
-  // Stats on right side
-  printf("┌─────────────────────────────────────┐\n");
-  printf("│ SPEED:          %.2f MKeys/s     │\n", speed);
-  printf("│ TOTAL SCANNED:  %'20zu │\n", atomic_load(&ctx->k_checked));
-  printf("│ THREADS:        %-20zu │\n", ctx->threads_count);
-  printf("└─────────────────────────────────────┘\n");
-  
-  fflush(stdout);
-}
-
-void update_matrix_keys(ctx_t *ctx, const fe pk) {
-  pthread_mutex_lock(&ctx->lock);
-  
-  // Scroll keys down
-  for (int i = 9; i > 0; i--) {
-    strcpy(ctx->matrix_keys[i], ctx->matrix_keys[i-1]);
-  }
-  
-  // Add new key at top
-  snprintf(ctx->matrix_keys[0], 65, "%016llx%016llx%016llx%016llx", 
-           pk[3], pk[2], pk[1], pk[0]);
-  
-  // Update current key
-  strcpy(ctx->current_key, ctx->matrix_keys[0]);
-  
-  pthread_mutex_unlock(&ctx->lock);
-}
-
 // note: this function is not thread-safe; use mutex lock before calling
 void ctx_print_unlocked(ctx_t *ctx) {
-  if (ctx->pure_random_mode) {
-    draw_matrix_display(ctx);
+  // Only thread 0 prints in pure random mode
+  if (ctx->pure_random_view && ctx->tid != 0) return;
+  
+  int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
+  double dt = MAX(1, effective_time) / 1000.0;
+  double speed = ctx->k_checked / dt / 1000000;
+  
+  // KeyHunt-style Pure Random View - Clean minimal output
+  if (ctx->pure_random_view && !ctx->quiet) {
+    static const char spin[4] = {'|', '/', '-', '\\'};
+    static int si = 0;
+    
+    fprintf(stderr, "\033[H\033[J"); // Clear terminal
+    fprintf(stderr, "SCANNING KEY: %s %c\n", ctx->sample_key, spin[si]);
+    fprintf(stderr, "SPEED: %.2f MKeys/s\n", speed);
+    fprintf(stderr, "TOTAL SCANNED: %zu\n", ctx->k_checked);
+    fflush(stderr);
+    si = (si + 1) & 3;
+    
+    if (ctx->finished) {
+      fprintf(stderr, "\n");
+    }
+    
     return;
   }
   
-  char *msg = atomic_load(&ctx->finished) ? "" : (ctx->paused ? " ('r' – resume)" : " ('p' – pause)");
-
-  int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
-  double dt = MAX(1, effective_time) / 1000.0;
-  double it = atomic_load(&ctx->k_checked) / dt / 1000000;
-  term_clear_line();
-  fprintf(stderr, "%.2fs ~ %.2f Mkeys/s ~ %'zu / %'zu%s%c", //
-          dt, it, atomic_load(&ctx->k_found), atomic_load(&ctx->k_checked), msg, atomic_load(&ctx->finished) ? '\n' : '\r');
-  fflush(stderr);
+  // Default view for other modes
+  if (!ctx->quiet) {
+    char key_hex[17];
+    snprintf(key_hex, sizeof(key_hex), "%016llx", ctx->range_s[3]);
+    printf("\rKey: %s... | Speed: %.2f MKeys/s | Total: %llu%s", 
+           key_hex, speed, (unsigned long long)ctx->k_checked,
+           ctx->finished ? "\n" : "");
+    fflush(stdout);
+  }
 }
 
 void ctx_print_status(ctx_t *ctx) {
@@ -228,8 +188,20 @@ void ctx_update(ctx_t *ctx, size_t k_checked) {
   size_t ts = tsnow();
 
   pthread_mutex_lock(&ctx->lock);
-  bool need_print = (ts - ctx->ts_printed) >= 100;
-  atomic_fetch_add(&ctx->k_checked, k_checked);
+  
+  // Update sample key for KeyHunt-style view (every update)
+  if (ctx->pure_random_view) {
+    snprintf(ctx->sample_key, sizeof(ctx->sample_key), 
+             "%016llx%016llx%016llx%016llx", 
+             ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
+  }
+  
+  // Update display every 20ms for KeyHunt view (smooth), 50ms for others
+  bool need_print = ctx->pure_random_view 
+    ? (ts - ctx->ts_printed) >= 20 
+    : (ts - ctx->ts_printed) >= 50;
+    
+  ctx->k_checked += k_checked;
   ctx->ts_updated = ts;
   if (need_print) {
     ctx->ts_printed = ts;
@@ -242,35 +214,8 @@ void ctx_update(ctx_t *ctx, size_t k_checked) {
 
 void ctx_finish(ctx_t *ctx) {
   pthread_mutex_lock(&ctx->lock);
-  atomic_store(&ctx->finished, true);
-  
-  if (ctx->pure_random_mode) {
-    // Clear and show final message
-    printf("\033[2J\033[H");
-    
-    if (atomic_load(&ctx->k_found) > 0) {
-      printf("\n");
-      printf("╔══════════════════════════════════════════════════════════════╗\n");
-      printf("║                      KEY FOUND!                              ║\n");
-      printf("╚══════════════════════════════════════════════════════════════╝\n");
-      printf("\n");
-      
-      if (strlen(ctx->current_key) > 0) {
-        printf("KEY: 0x%s\n\n", ctx->current_key);
-      }
-      
-      int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
-      double dt = MAX(1, effective_time) / 1000.0;
-      double speed = atomic_load(&ctx->k_checked) / dt / 1000000;
-      
-      printf("Time elapsed: %.2f seconds\n", dt);
-      printf("Total scanned: %'zu keys\n", atomic_load(&ctx->k_checked));
-      printf("Average speed: %.2f MKeys/s\n", speed);
-    }
-  } else {
-    ctx_print_unlocked(ctx);
-  }
-  
+  ctx->finished = true;
+  ctx_print_unlocked(ctx);
   if (ctx->outfile != NULL) fclose(ctx->outfile);
   pthread_mutex_unlock(&ctx->lock);
 }
@@ -279,15 +224,18 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
   pthread_mutex_lock(&ctx->lock);
 
   if (!ctx->quiet) {
-    if (ctx->pure_random_mode) {
-      // Update current key to show the found key
-      snprintf(ctx->current_key, 65, "%016llx%016llx%016llx%016llx", 
-               pk[3], pk[2], pk[1], pk[0]);
+    if (ctx->pure_random_view) {
+      // KeyHunt-style found key display - Clean text only
+      fprintf(stderr, "\n\n*** KEY FOUND! ***\n");
+      fprintf(stderr, "0x%016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
+      fprintf(stderr, "\n");
+      fflush(stderr);
     } else {
-      term_clear_line();
-      printf("%s: %08x%08x%08x%08x%08x <- %016llx%016llx%016llx%016llx\n", //
-             label, hash[0], hash[1], hash[2], hash[3], hash[4],           //
-             pk[3], pk[2], pk[1], pk[0]);
+      // Original display
+      printf("\n*** KEY FOUND! ***\n");
+      printf("0x%016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
+      printf("\n");
+      fflush(stdout);
     }
   }
 
@@ -298,14 +246,7 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
     fflush(ctx->outfile);
   }
 
-  atomic_fetch_add(&ctx->k_found, 1);
-  
-  // IMMEDIATELY signal all threads to stop
-  atomic_store(&ctx->finished, true);
-  
-  if (!ctx->pure_random_mode) {
-    ctx_print_unlocked(ctx);
-  }
+  ctx->k_found += 1;
 
   pthread_mutex_unlock(&ctx->lock);
 }
@@ -397,17 +338,11 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
   h160_t hs65[HASH_BATCH_SIZE];
 
   for (size_t i = 0; i < GROUP_INV_SIZE; i += HASH_BATCH_SIZE) {
-    // Check if we should stop
-    if (atomic_load(&ctx->finished)) return;
-    
     if (ctx->check_addr33) addr33_batch(hs33, points + i, HASH_BATCH_SIZE);
     if (ctx->check_addr65) addr65_batch(hs65, points + i, HASH_BATCH_SIZE);
     for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
       if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, i + j, 0);
       if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, i + j, 0);
-      
-      // Exit immediately if key found
-      if (atomic_load(&ctx->finished)) return;
     }
   }
 
@@ -423,8 +358,6 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
 
   size_t ci = 0;
   for (size_t k = 0; k < GROUP_INV_SIZE; ++k) {
-    if (atomic_load(&ctx->finished)) return;
-    
     size_t idx = (k * 5) % esize;
 
     fe_clone(endos[idx + 0].x, points[k].x); // (x, -y)
@@ -446,17 +379,15 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
     if (!is_full) continue;
 
     for (size_t i = 0; i < esize; i += HASH_BATCH_SIZE) {
-      if (atomic_load(&ctx->finished)) return;
-      
       if (ctx->check_addr33) addr33_batch(hs33, endos + i, HASH_BATCH_SIZE);
       if (ctx->check_addr65) addr65_batch(hs65, endos + i, HASH_BATCH_SIZE);
 
       for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
+        // if (ci >= (GROUP_INV_SIZE * 5)) break;
+        // printf(">> %6zu | %6zu ~ %zu\n", ci, ci / 5, (ci % 5) + 1);
         if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, ci / 5, (ci % 5) + 1);
         if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, ci / 5, (ci % 5) + 1);
         ci += 1;
-        
-        if (atomic_load(&ctx->finished)) return;
       }
     }
   }
@@ -484,9 +415,6 @@ void batch_add(ctx_t *ctx, const fe pk, const size_t iterations) {
 
   size_t counter = 0;
   while (counter < iterations) {
-    // Check stop flag before each iteration
-    if (atomic_load(&ctx->finished)) return;
-    
     for (size_t i = 0; i < hsize; ++i) fe_modp_sub(dx[i], ctx->gpoints[i].x, GStart.x);
     fe_modp_grpinv(dx, hsize);
 
@@ -506,6 +434,9 @@ void batch_add(ctx_t *ctx, const fe pk, const size_t iterations) {
         fe_modp_mul(dd, ss, dd);                              // λ * (x1 - rx)
         fe_modp_sub(ry, dd, GStart.y);                        // ry = λ * (x1 - rx) - y1
 
+        // ordered by pk:
+        // [0]: K-N/2, [1]: K-N/2+1, .., [N/2-1]: K-1 // all minus points
+        // [N/2]: K, [N/2+1]: K+1, .., [N-1]: K+N/2-1 // K, plus points without last element
         size_t idx = positive ? hsize + i + 1 : hsize - 1 - i;
         fe_clone(bp[idx].x, rx);
         fe_clone(bp[idx].y, ry);
@@ -514,12 +445,6 @@ void batch_add(ctx_t *ctx, const fe pk, const size_t iterations) {
     }
 
     check_found_add(ctx, ck, bp);
-    
-    // Update matrix display in pure random mode
-    if (ctx->pure_random_mode) {
-      update_matrix_keys(ctx, ck);
-    }
-    
     fe_modn_add_stride(ck, ck, ctx->stride_k, GROUP_INV_SIZE); // move pk to next group START
     ec_jacobi_addrdc(&GStart, &GStart, &ctx->stride_p);        // move GStart to next group CENTER
     counter += GROUP_INV_SIZE;
@@ -539,10 +464,10 @@ void *cmd_add_worker(void *arg) {
   fe_modn_mul(inc, inc, ctx->stride_k);
 
   fe pk;
-  while (!atomic_load(&ctx->finished)) {
+  while (true) {
     pthread_mutex_lock(&ctx->lock);
     bool is_overflow = fe_cmp(ctx->range_s, initial_r) < 0;
-    if (fe_cmp(ctx->range_s, ctx->range_e) >= 0 || is_overflow || atomic_load(&ctx->finished)) {
+    if (fe_cmp(ctx->range_s, ctx->range_e) >= 0 || is_overflow) {
       pthread_mutex_unlock(&ctx->lock);
       break;
     }
@@ -553,9 +478,6 @@ void *cmd_add_worker(void *arg) {
 
     batch_add(ctx, pk, ctx->job_size);
     ctx_update(ctx, ctx->use_endo ? ctx->job_size * 6 : ctx->job_size);
-    
-    // Check stop flag after each batch
-    if (atomic_load(&ctx->finished)) break;
   }
 
   return NULL;
@@ -587,22 +509,20 @@ void check_found_mul(ctx_t *ctx, const fe *pk, const pe *cp, size_t cnt) {
   h160_t hs65[HASH_BATCH_SIZE];
 
   for (size_t i = 0; i < cnt; i += HASH_BATCH_SIZE) {
-    if (atomic_load(&ctx->finished)) return;
-    
     size_t batch_size = MIN(HASH_BATCH_SIZE, cnt - i);
     if (ctx->check_addr33) addr33_batch(hs33, cp + i, batch_size);
     if (ctx->check_addr65) addr65_batch(hs65, cp + i, batch_size);
 
     for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
       if (ctx->check_addr33 && ctx_check_hash(ctx, hs33[j])) {
+        // pk_verify_hash(pk[i + j], hs33[j], true, 0);
         ctx_write_found(ctx, "addr33", hs33[j], pk[i + j]);
       }
 
       if (ctx->check_addr65 && ctx_check_hash(ctx, hs65[j])) {
+        // pk_verify_hash(pk[i + j], hs65[j], false, 0);
         ctx_write_found(ctx, "addr65", hs65[j], pk[i + j]);
       }
-      
-      if (atomic_load(&ctx->finished)) return;
     }
   }
 }
@@ -623,7 +543,7 @@ void *cmd_mul_worker(void *arg) {
   pe cp[GROUP_INV_SIZE];
   cmd_mul_job_t *job = NULL;
 
-  while (!atomic_load(&ctx->finished)) {
+  while (true) {
     if (job != NULL) free(job);
     job = queue_get(&ctx->queue);
     if (job == NULL) break;
@@ -643,6 +563,11 @@ void *cmd_mul_worker(void *arg) {
         msg[len] = 0x80;
         for (int j = 0; j < 8; j++) msg[msg_size - 1 - j] = bitlen >> (j * 8);
         sha256_final(res, (u8 *)msg, msg_size);
+
+        // debug log (do with `-t 1`)
+        // printf("\n%zu %s\n", len, job->lines[i]);
+        // for (int i = 0; i < msg_size; i++) printf("%02x%s", msg[i], i % 16 == 15 ? "\n" : " ");
+        // for (int i = 0; i < 8; i++) printf("%08x%s", res[i], i % 8 == 7 ? "\n" : "");
 
         pk[i][0] = (u64)res[6] << 32 | res[7];
         pk[i][1] = (u64)res[4] << 32 | res[5];
@@ -673,7 +598,7 @@ void cmd_mul(ctx_t *ctx) {
   cmd_mul_job_t *job = calloc(1, sizeof(cmd_mul_job_t));
   char line[MAX_LINE_SIZE];
 
-  while (fgets(line, sizeof(line), stdin) != NULL && !atomic_load(&ctx->finished)) {
+  while (fgets(line, sizeof(line), stdin) != NULL) {
     size_t len = strlen(line);
     if (len && line[len - 1] == '\n') line[--len] = '\0';
     if (len && line[len - 1] == '\r') line[--len] = '\0';
@@ -702,23 +627,24 @@ void cmd_mul(ctx_t *ctx) {
 // MARK: CMD_RND
 
 void gen_random_range(ctx_t *ctx, const fe a, const fe b) {
-  fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
-  fe_clone(ctx->range_e, ctx->range_s);
-  
-  // Pure random mode (-d 0:0): generate small chunk for thread distribution
+  // Pure random mode: generate small chunk around random key for thread distribution
   if (ctx->ord_size == 0) {
+    fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
+    fe_clone(ctx->range_e, ctx->range_s);
+    
+    // Create a small range for thread distribution (threads_count * job_size)
     fe chunk_size;
     fe_set64(chunk_size, ctx->threads_count * ctx->job_size);
     fe_modn_add(ctx->range_e, ctx->range_s, chunk_size);
     
-    // Make sure we don't exceed bounds
-    if (fe_cmp(ctx->range_e, b) > 0) {
-      fe_clone(ctx->range_e, b);
-    }
+    // Keep within bounds
+    if (fe_cmp(ctx->range_e, b) > 0) fe_clone(ctx->range_e, b);
     return;
   }
-  
-  // Regular random mode with bit ranges
+
+  // Chunked random mode: generate random base with dynamic bits
+  fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
+  fe_clone(ctx->range_e, ctx->range_s);
   for (u32 i = ctx->ord_offs; i < (ctx->ord_offs + ctx->ord_size); ++i) {
     ctx->range_s[i / 64] &= ~(1ULL << (i % 64));
     ctx->range_e[i / 64] |= 1ULL << (i % 64);
@@ -757,17 +683,8 @@ void print_range_mask(fe range_s, u32 bits_size, u32 offset, bool use_color) {
 
 void cmd_rnd(ctx_t *ctx) {
   ctx->ord_offs = MIN(ctx->ord_offs, 255 - ctx->ord_size);
+  // Silent mode - no header output
   
-  if (ctx->pure_random_mode) {
-    printf("[PURE RANDOM MODE] - Matrix Display Enabled\n");
-    printf("Threads: %zu | Address: %s%s\n\n", 
-           ctx->threads_count, 
-           ctx->check_addr33 ? "compressed" : "", 
-           ctx->check_addr65 ? "uncompressed" : "");
-  } else {
-    printf("[RANDOM MODE] offs: %d ~ bits: %d\n\n", ctx->ord_offs, ctx->ord_size);
-  }
-
   ctx_precompute_gpoints(ctx);
   ctx->job_size = MAX_JOB_SIZE;
   ctx->ts_started = tsnow(); // actual start time
@@ -776,19 +693,9 @@ void cmd_rnd(ctx_t *ctx) {
   fe_clone(range_s, ctx->range_s);
   fe_clone(range_e, ctx->range_e);
 
-  size_t last_c = 0, last_f = 0, s_time = 0;
-  while (!atomic_load(&ctx->finished)) {
-    last_c = atomic_load(&ctx->k_checked);
-    last_f = atomic_load(&ctx->k_found);
-    s_time = tsnow();
-
+  while (true) {
     gen_random_range(ctx, range_s, range_e);
-    
-    if (!ctx->pure_random_mode) {
-      print_range_mask(ctx->range_s, ctx->ord_size, ctx->ord_offs, ctx->use_color);
-      print_range_mask(ctx->range_e, ctx->ord_size, ctx->ord_offs, ctx->use_color);
-    }
-    
+    // Silent mode - no range printing
     ctx_print_status(ctx);
 
     // if full range is used, skip break after first iteration
@@ -802,17 +709,8 @@ void cmd_rnd(ctx_t *ctx) {
       pthread_join(ctx->threads[i], NULL);
     }
 
-    // Exit if key found
-    if (atomic_load(&ctx->finished)) break;
-
-    if (!ctx->pure_random_mode) {
-      size_t dc = atomic_load(&ctx->k_checked) - last_c;
-      size_t df = atomic_load(&ctx->k_found) - last_f;
-      double dt = MAX((tsnow() - s_time), 1ul) / 1000.0;
-      term_clear_line();
-      printf("%'zu / %'zu ~ %.1fs\n\n", df, dc, dt);
-    }
-
+    // Silent mode - no iteration stats
+    
     if (is_full) break;
   }
 
@@ -838,6 +736,9 @@ void arg_search_range(args_t *args, fe range_s, fe range_e) {
   *sep = 0;
   fe_modn_from_hex(range_s, raw);
   fe_modn_from_hex(range_e, sep + 1);
+
+  // if (fe_cmp64(range_s, GROUP_INV_SIZE) <= 0) fe_set64(range_s, GROUP_INV_SIZE + 1);
+  // if (fe_cmp(range_e, FE_P) > 0) fe_clone(range_e, FE_P);
 
   if (fe_cmp64(range_s, GROUP_INV_SIZE) <= 0) {
     fprintf(stderr, "invalid search range, start <= %#lx\n", GROUP_INV_SIZE);
@@ -891,16 +792,16 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
     exit(1);
   }
 
-  // Allow -d 0:0 for pure random mode
-  if (tmp_size == 0 && tmp_offs == 0) {
+  // Allow bits == 0 for pure random mode, otherwise enforce MIN_SIZE
+  if (tmp_size == 0) {
+    // Pure random mode: -d 0:0
     ctx->ord_offs = 0;
     ctx->ord_size = 0;
-    ctx->pure_random_mode = true;
     return;
   }
 
   if (tmp_size < MIN_SIZE || tmp_size > MAX_SIZE) {
-    fprintf(stderr, "invalid size, min is %d and max is %d (or use -d 0:0 for pure random mode)\n", MIN_SIZE, MAX_SIZE);
+    fprintf(stderr, "invalid size, min is %d and max is %d (or 0 for pure random mode)\n", MIN_SIZE, MAX_SIZE);
     exit(1);
   }
 
@@ -924,7 +825,7 @@ void usage(const char *name) {
   printf("  -a <addr_type>  - address type to search: c - addr33, u - addr65 (default: c)\n");
   printf("  -r <range>      - search range in hex format (example: 8000:ffff, default all)\n");
   printf("  -d <offs:size>  - bit offset and size for search (example: 128:32, default: 0:32)\n");
-  printf("                    use -d 0:0 for PURE RANDOM mode with Matrix display\n");
+  printf("                    use -d 0:0 for pure random mode (no chunking)\n");
   printf("  -q              - quiet mode (no output to stdout; -o required)\n");
   printf("  -endo           - use endomorphism (default: false)\n");
   printf("\nOther commands:\n");
@@ -997,42 +898,29 @@ void init(ctx_t *ctx, args_t *args) {
   int cpus = get_cpu_count();
   ctx->threads_count = MIN(MAX(args_uint(args, "-t", cpus), 1ul), 320ul);
   ctx->threads = malloc(ctx->threads_count * sizeof(pthread_t));
-  atomic_store(&ctx->finished, false);
-  atomic_store(&ctx->k_checked, 0);
-  atomic_store(&ctx->k_found, 0);
+  ctx->finished = false;
+  ctx->k_checked = 0;
+  ctx->k_found = 0;
   ctx->ts_started = tsnow();
   ctx->ts_updated = ctx->ts_started;
   ctx->ts_printed = ctx->ts_started - 5e3;
   ctx->paused_time = 0;
   ctx->paused = false;
 
-  // Initialize matrix display BEFORE load_offs_size
-  ctx->pure_random_mode = false;
-  ctx->matrix_index = 0;
-  ctx->current_key[0] = '\0';
-  for (int i = 0; i < 10; i++) {
-    ctx->matrix_keys[i][0] = '\0';
-  }
-
   arg_search_range(args, ctx->range_s, ctx->range_e);
-  load_offs_size(ctx, args);  // This will set pure_random_mode if -d 0:0
+  load_offs_size(ctx, args);
   queue_init(&ctx->queue, ctx->threads_count * 3);
 
-  if (!ctx->pure_random_mode) {
-    printf("threads: %zu ~ addr33: %d ~ addr65: %d ~ endo: %d | filter: ", //
-           ctx->threads_count, ctx->check_addr33, ctx->check_addr65, ctx->use_endo);
+  // Enable KeyHunt-style view for pure random mode (-d 0:0)
+  ctx->pure_random_view = (ctx->ord_size == 0 && ctx->cmd == CMD_RND);
+  ctx->tid = 0; // Main thread is 0
+  
+  // Initialize sample_key
+  snprintf(ctx->sample_key, sizeof(ctx->sample_key), 
+           "0000000000000000000000000000000000000000000000000000000000000000");
 
-    if (ctx->to_find_hashes != NULL) printf("list (%'zu)\n", ctx->to_find_count);
-    else printf("bloom\n");
-
-    if (ctx->cmd == CMD_ADD) {
-      fe_print("range_s", ctx->range_s);
-      fe_print("range_e", ctx->range_e);
-    }
-
-    printf("----------------------------------------\n");
-  }
-
+  // Silent mode - no initialization output
+  
   if (ctx->cmd == CMD_MUL) {
     ctx->raw_text = args_bool(args, "-raw");
   }
