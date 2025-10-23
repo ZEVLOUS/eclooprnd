@@ -7,11 +7,16 @@
 #include <signal.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
 
-#include "lib/addr.c"
-#include "lib/bench.c"
-#include "lib/ecc.c"
-#include "lib/utils.c"
+// Include header files instead of .c files to avoid multiple definitions
+#include "lib/addr.h"
+#include "lib/bench.h"
+#include "lib/ecc.h"
+#include "lib/utils.h"
 
 #define VERSION "0.5.0"
 #define MAX_JOB_SIZE 1024 * 1024 * 2
@@ -26,7 +31,7 @@ enum Cmd { CMD_NIL, CMD_ADD, CMD_MUL, CMD_RND };
 // Global flag for immediate stop when key found
 static volatile bool global_key_found = false;
 
-// Function declarations for functions defined in lib/utils.c and lib/ecc.c
+// Function declarations - these are defined in the lib files
 void fe_rand(fe x, bool use_entropy);
 void fe_rand_range(fe x, const fe a, const fe b, bool use_entropy);
 size_t fe_bitlen(const fe x);
