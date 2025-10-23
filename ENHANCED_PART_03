@@ -1,0 +1,7 @@
+  if (ctx.cmd == CMD_ADD) cmd_add(&ctx);
+  if (ctx.cmd == CMD_MUL) cmd_mul(&ctx);
+  if (ctx.cmd == CMD_RND) cmd_rnd(&ctx);
+  if (ctx.cmd == CMD_SCAN) cmd_scan(&ctx);
+
+  return 0;
+}
