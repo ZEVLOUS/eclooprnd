@@ -1,9 +1,6 @@
 // Copyright (c) vladkens
 // https://github.com/vladkens/ecloop
 // Licensed under the MIT License.
-// 
-// HYBRID ENHANCED VERSION v1.0
-// Combines: Thread Safety + Error Handling + All Enhanced Features
 
 #include <locale.h>
 #include <pthread.h>
@@ -16,7 +13,7 @@
 #include "lib/ecc.c"
 #include "lib/utils.c"
 
-#define VERSION "0.6.0-hybrid"
+#define VERSION "0.5.1-matrix"
 #define MAX_JOB_SIZE 1024 * 1024 * 2
 #define GROUP_INV_SIZE 2048ul
 #define MAX_LINE_SIZE 1025
@@ -24,17 +21,13 @@
 static_assert(GROUP_INV_SIZE % HASH_BATCH_SIZE == 0,
               "GROUP_INV_SIZE must be divisible by HASH_BATCH_SIZE");
 
-enum Cmd { CMD_NIL, CMD_ADD, CMD_MUL, CMD_RND, CMD_SCAN };
+enum Cmd { CMD_NIL, CMD_ADD, CMD_MUL, CMD_RND };
 
 typedef struct ctx_t {
   enum Cmd cmd;
   pthread_mutex_t lock;
-  pthread_cond_t pause_cond;
   size_t threads_count;
   pthread_t *threads;
-  int tid;
-  _Atomic bool pure_random_view;
-  char sample_key[67];
   _Atomic size_t k_checked;
   _Atomic size_t k_found;
   bool check_addr33;
@@ -45,118 +38,67 @@ typedef struct ctx_t {
   bool quiet;
   bool use_color;
 
-  _Atomic bool finished;
-  _Atomic bool paused;
-  size_t ts_started;
-  size_t ts_updated;
-  size_t ts_printed;
-  size_t ts_paused_at;
-  size_t paused_time;
+  _Atomic bool finished;       // true if the program is exiting
+  bool paused;                  // true if the program is paused
+  size_t ts_started;            // timestamp of start
+  size_t ts_updated;            // timestamp of last update
+  size_t ts_printed;            // timestamp of last print
+  size_t ts_paused_at;          // timestamp when paused
+  size_t paused_time;           // time spent in paused state
 
+  // filter file (bloom filter or hashes to search)
   h160_t *to_find_hashes;
   size_t to_find_count;
   blf_t blf;
 
-  fe range_s;
-  fe range_e;
-  fe stride_k;
-  pe stride_p;
+  // cmd add
+  fe range_s;  // search range start
+  fe range_e;  // search range end
+  fe stride_k; // precomputed stride key (step for G-points, 2^offset)
+  pe stride_p; // precomputed stride point (G * pk)
   pe gpoints[GROUP_INV_SIZE];
   size_t job_size;
 
+  // cmd mul
   queue_t queue;
   bool raw_text;
 
+  // cmd rnd
   bool has_seed;
-  u32 ord_offs;
-  u32 ord_size;
-
-  _Atomic bool stop_on_found;
-  char matrix_keys[10][65];
-  int matrix_index;
-  size_t scan_total_range;
-  char target_address[64];
+  u32 ord_offs; // offset (order) of range to search
+  u32 ord_size; // size (span) in range to search
   
-  // Enhanced features
-  size_t last_k_checked;
-  size_t last_k_timestamp;
-  fe current_scan_pos;
-  bool enable_beep;
-  FILE *logfile;
-  char session_file[256];
-  bool load_session;
+  // Matrix display
+  bool pure_random_mode;        // true for -d 0:0
+  char matrix_keys[10][65];     // Scrolling keys display
+  int matrix_index;
+  char current_key[65];
 } ctx_t;
 
-// Global context for signal handler
-static ctx_t *global_ctx = NULL;
-
-// Safe string operations
-void safe_strcpy(char *dest, const char *src, size_t dest_size) {
-  if (dest == NULL || src == NULL || dest_size == 0) return;
-  strncpy(dest, src, dest_size - 1);
-  dest[dest_size - 1] = '\0';
-}
-
-// Memory cleanup
-void ctx_cleanup(ctx_t *ctx) {
-  if (ctx == NULL) return;
-  
-  if (ctx->to_find_hashes != NULL) {
-    free(ctx->to_find_hashes);
-    ctx->to_find_hashes = NULL;
-  }
-  
-  if (ctx->blf.bits != NULL) {
-    free(ctx->blf.bits);
-    ctx->blf.bits = NULL;
-  }
-  
-  if (ctx->threads != NULL) {
-    free(ctx->threads);
-    ctx->threads = NULL;
-  }
-  
-  pthread_mutex_destroy(&ctx->lock);
-  pthread_cond_destroy(&ctx->pause_cond);
-  
-  if (ctx->outfile != NULL && ctx->outfile != stdout) {
-    fclose(ctx->outfile);
-    ctx->outfile = NULL;
-  }
-  
-  if (ctx->logfile != NULL) {
-    fclose(ctx->logfile);
-    ctx->logfile = NULL;
-  }
-}
-
-bool load_filter(ctx_t *ctx, const char *filepath) {
+void load_filter(ctx_t *ctx, const char *filepath) {
   if (!filepath) {
     fprintf(stderr, "missing filter file\n");
-    return false;
+    exit(1);
   }
 
   FILE *file = fopen(filepath, "rb");
   if (!file) {
     fprintf(stderr, "failed to open filter file: %s\n", filepath);
-    return false;
+    exit(1);
   }
 
   char *ext = strrchr(filepath, '.');
   if (ext != NULL && strcmp(ext, ".blf") == 0) {
-    bool result = blf_load(filepath, &ctx->blf);
+    if (!blf_load(filepath, &ctx->blf)) exit(1);
     fclose(file);
-    return result;
+    return;
   }
 
   size_t hlen = sizeof(u32) * 5;
+  assert(hlen == sizeof(h160_t));
   size_t capacity = 32;
   size_t size = 0;
   u32 *hashes = malloc(capacity * hlen);
-  if (!hashes) {
-    fclose(file);
-    return false;
-  }
 
   hex40 line;
   while (fgets(line, sizeof(line), file)) {
@@ -164,29 +106,20 @@ bool load_filter(ctx_t *ctx, const char *filepath) {
 
     if (size >= capacity) {
       capacity *= 2;
-      u32 *new_hashes = realloc(hashes, capacity * hlen);
-      if (!new_hashes) {
-        free(hashes);
-        fclose(file);
-        return false;
-      }
-      hashes = new_hashes;
+      hashes = realloc(hashes, capacity * hlen);
     }
 
     for (size_t j = 0; j < sizeof(line) - 1; j += 8) {
       sscanf(line + j, "%8x", &hashes[size * 5 + j / 8]);
     }
+
     size += 1;
   }
+
   fclose(file);
-
-  if (size == 0) {
-    free(hashes);
-    return false;
-  }
-
   qsort(hashes, size, hlen, compare_160);
 
+  // remove duplicates
   size_t unique_count = 0;
   for (size_t i = 1; i < size; ++i) {
     if (memcmp(&hashes[unique_count * 5], &hashes[i * 5], hlen) != 0) {
@@ -198,54 +131,85 @@ bool load_filter(ctx_t *ctx, const char *filepath) {
   ctx->to_find_hashes = (h160_t *)hashes;
   ctx->to_find_count = unique_count + 1;
 
+  // generate in-memory bloom filter
   ctx->blf.size = ctx->to_find_count * 2;
   ctx->blf.bits = malloc(ctx->blf.size * sizeof(u64));
-  if (!ctx->blf.bits) {
-    free(hashes);
-    ctx->to_find_hashes = NULL;
-    return false;
-  }
-  memset(ctx->blf.bits, 0, ctx->blf.size * sizeof(u64));
-  
-  for (size_t i = 0; i < ctx->to_find_count; ++i) {
-    blf_add(&ctx->blf, hashes + i * 5);
-  }
-  
-  return true;
+  for (size_t i = 0; i < ctx->to_find_count; ++i) blf_add(&ctx->blf, hashes + i * 5);
 }
 
-void ctx_print_unlocked(ctx_t *ctx) {
-  if (atomic_load(&ctx->pure_random_view) && ctx->tid != 0) return;
-  
+// Matrix-style display for pure random mode
+void draw_matrix_display(ctx_t *ctx) {
   int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
   double dt = MAX(1, effective_time) / 1000.0;
   double speed = atomic_load(&ctx->k_checked) / dt / 1000000;
   
-  if (atomic_load(&ctx->pure_random_view) && !ctx->quiet) {
-    static const char spin[4] = {'|', '/', '-', '\\'};
-    static int si = 0;
-    
-    fprintf(stderr, "\033[H\033[J");
-    fprintf(stderr, "SCANNING KEY: %s %c\n", ctx->sample_key, spin[si]);
-    fprintf(stderr, "SPEED: %.2f MKeys/s\n", speed);
-    fprintf(stderr, "TOTAL SCANNED: %zu\n", atomic_load(&ctx->k_checked));
-    fflush(stderr);
-    si = (si + 1) & 3;
-    
-    if (atomic_load(&ctx->finished)) {
-      fprintf(stderr, "\n");
+  // Clear screen and move cursor to top
+  printf("\033[2J\033[H");
+  
+  // Display current scanning key at top
+  if (strlen(ctx->current_key) > 0) {
+    printf("SCANNING KEY: %s\n\n", ctx->current_key);
+  } else {
+    printf("SCANNING KEY: initializing...\n\n");
+  }
+  
+  // Matrix scrolling keys with color fade
+  for (int i = 0; i < 10; i++) {
+    if (strlen(ctx->matrix_keys[i]) > 0) {
+      // Green color fade (bright to dim)
+      int color = 46 - (i * 2);
+      printf("\033[38;5;%dm%s\033[0m\n", color, ctx->matrix_keys[i]);
+    } else {
+      printf("\n");
     }
+  }
+  
+  printf("\n");
+  
+  // Stats on right side
+  printf("┌─────────────────────────────────────┐\n");
+  printf("│ SPEED:          %.2f MKeys/s     │\n", speed);
+  printf("│ TOTAL SCANNED:  %'20zu │\n", atomic_load(&ctx->k_checked));
+  printf("│ THREADS:        %-20zu │\n", ctx->threads_count);
+  printf("└─────────────────────────────────────┘\n");
+  
+  fflush(stdout);
+}
+
+void update_matrix_keys(ctx_t *ctx, const fe pk) {
+  pthread_mutex_lock(&ctx->lock);
+  
+  // Scroll keys down
+  for (int i = 9; i > 0; i--) {
+    strcpy(ctx->matrix_keys[i], ctx->matrix_keys[i-1]);
+  }
+  
+  // Add new key at top
+  snprintf(ctx->matrix_keys[0], 65, "%016llx%016llx%016llx%016llx", 
+           pk[3], pk[2], pk[1], pk[0]);
+  
+  // Update current key
+  strcpy(ctx->current_key, ctx->matrix_keys[0]);
+  
+  pthread_mutex_unlock(&ctx->lock);
+}
+
+// note: this function is not thread-safe; use mutex lock before calling
+void ctx_print_unlocked(ctx_t *ctx) {
+  if (ctx->pure_random_mode) {
+    draw_matrix_display(ctx);
     return;
   }
   
-  if (!ctx->quiet) {
-    char key_hex[17];
-    snprintf(key_hex, sizeof(key_hex), "%016llx", ctx->range_s[3]);
-    printf("\rKey: %s... | Speed: %.2f MKeys/s | Total: %llu%s", 
-           key_hex, speed, (unsigned long long)atomic_load(&ctx->k_checked),
-           atomic_load(&ctx->finished) ? "\n" : "");
-    fflush(stdout);
-  }
+  char *msg = atomic_load(&ctx->finished) ? "" : (ctx->paused ? " ('r' – resume)" : " ('p' – pause)");
+
+  int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
+  double dt = MAX(1, effective_time) / 1000.0;
+  double it = atomic_load(&ctx->k_checked) / dt / 1000000;
+  term_clear_line();
+  fprintf(stderr, "%.2fs ~ %.2f Mkeys/s ~ %'zu / %'zu%s%c", //
+          dt, it, atomic_load(&ctx->k_found), atomic_load(&ctx->k_checked), msg, atomic_load(&ctx->finished) ? '\n' : '\r');
+  fflush(stderr);
 }
 
 void ctx_print_status(ctx_t *ctx) {
@@ -255,28 +219,16 @@ void ctx_print_status(ctx_t *ctx) {
 }
 
 void ctx_check_paused(ctx_t *ctx) {
-  pthread_mutex_lock(&ctx->lock);
-  while (atomic_load(&ctx->paused)) {
-    pthread_cond_wait(&ctx->pause_cond, &ctx->lock);
+  if (ctx->paused) {
+    while (ctx->paused) usleep(100000);
   }
-  pthread_mutex_unlock(&ctx->lock);
 }
 
 void ctx_update(ctx_t *ctx, size_t k_checked) {
   size_t ts = tsnow();
 
   pthread_mutex_lock(&ctx->lock);
-  
-  if (atomic_load(&ctx->pure_random_view)) {
-    snprintf(ctx->sample_key, sizeof(ctx->sample_key), 
-             "%016llx%016llx%016llx%016llx", 
-             ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
-  }
-  
-  bool need_print = atomic_load(&ctx->pure_random_view) 
-    ? (ts - ctx->ts_printed) >= 20 
-    : (ts - ctx->ts_printed) >= 50;
-    
+  bool need_print = (ts - ctx->ts_printed) >= 100;
   atomic_fetch_add(&ctx->k_checked, k_checked);
   ctx->ts_updated = ts;
   if (need_print) {
@@ -291,11 +243,35 @@ void ctx_update(ctx_t *ctx, size_t k_checked) {
 void ctx_finish(ctx_t *ctx) {
   pthread_mutex_lock(&ctx->lock);
   atomic_store(&ctx->finished, true);
-  ctx_print_unlocked(ctx);
-  if (ctx->outfile != NULL && ctx->outfile != stdout) {
-    fclose(ctx->outfile);
-    ctx->outfile = NULL;
+  
+  if (ctx->pure_random_mode) {
+    // Clear and show final message
+    printf("\033[2J\033[H");
+    
+    if (atomic_load(&ctx->k_found) > 0) {
+      printf("\n");
+      printf("╔══════════════════════════════════════════════════════════════╗\n");
+      printf("║                      KEY FOUND!                              ║\n");
+      printf("╚══════════════════════════════════════════════════════════════╝\n");
+      printf("\n");
+      
+      if (strlen(ctx->current_key) > 0) {
+        printf("KEY: 0x%s\n\n", ctx->current_key);
+      }
+      
+      int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
+      double dt = MAX(1, effective_time) / 1000.0;
+      double speed = atomic_load(&ctx->k_checked) / dt / 1000000;
+      
+      printf("Time elapsed: %.2f seconds\n", dt);
+      printf("Total scanned: %'zu keys\n", atomic_load(&ctx->k_checked));
+      printf("Average speed: %.2f MKeys/s\n", speed);
+    }
+  } else {
+    ctx_print_unlocked(ctx);
   }
+  
+  if (ctx->outfile != NULL) fclose(ctx->outfile);
   pthread_mutex_unlock(&ctx->lock);
 }
 
@@ -303,48 +279,59 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
   pthread_mutex_lock(&ctx->lock);
 
   if (!ctx->quiet) {
-    if (atomic_load(&ctx->pure_random_view)) {
-      fprintf(stderr, "\n\n*** KEY FOUND! ***\n");
-      fprintf(stderr, "0x%016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
-      fprintf(stderr, "\n");
-      fflush(stderr);
+    if (ctx->pure_random_mode) {
+      // Update current key to show the found key
+      snprintf(ctx->current_key, 65, "%016llx%016llx%016llx%016llx", 
+               pk[3], pk[2], pk[1], pk[0]);
     } else {
-      printf("\n*** KEY FOUND! ***\n");
-      printf("0x%016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
-      printf("\n");
-      fflush(stdout);
+      term_clear_line();
+      printf("%s: %08x%08x%08x%08x%08x <- %016llx%016llx%016llx%016llx\n", //
+             label, hash[0], hash[1], hash[2], hash[3], hash[4],           //
+             pk[3], pk[2], pk[1], pk[0]);
     }
   }
 
   if (ctx->outfile != NULL) {
-    fprintf(ctx->outfile, "%s\t%08x%08x%08x%08x%08x\t%016llx%016llx%016llx%016llx\n",
-            label, hash[0], hash[1], hash[2], hash[3], hash[4],
+    fprintf(ctx->outfile, "%s\t%08x%08x%08x%08x%08x\t%016llx%016llx%016llx%016llx\n", //
+            label, hash[0], hash[1], hash[2], hash[3], hash[4],                       //
             pk[3], pk[2], pk[1], pk[0]);
     fflush(ctx->outfile);
   }
 
   atomic_fetch_add(&ctx->k_found, 1);
+  
+  // IMMEDIATELY signal all threads to stop
+  atomic_store(&ctx->finished, true);
+  
+  if (!ctx->pure_random_mode) {
+    ctx_print_unlocked(ctx);
+  }
+
   pthread_mutex_unlock(&ctx->lock);
 }
 
 bool ctx_check_hash(ctx_t *ctx, const h160_t h) {
+  // bloom filter only mode
   if (ctx->to_find_hashes == NULL) {
     return blf_has(&ctx->blf, h);
   }
 
-  if (!blf_has(&ctx->blf, h)) return false;
+  // check by hashes list
+  if (!blf_has(&ctx->blf, h)) return false; // fast check with bloom filter
 
+  // if bloom filter check passed, do full check
   h160_t *rs = bsearch(h, ctx->to_find_hashes, ctx->to_find_count, sizeof(h160_t), compare_160);
   return rs != NULL;
 }
 
-bool ctx_precompute_gpoints(ctx_t *ctx) {
+void ctx_precompute_gpoints(ctx_t *ctx) {
+  // precalc addition step with stride (2^offset)
   fe_set64(ctx->stride_k, 1);
   fe_shiftl(ctx->stride_k, ctx->ord_offs);
 
-  fe t;
+  fe t; // precalc stride point
   fe_modn_add_stride(t, FE_ZERO, ctx->stride_k, GROUP_INV_SIZE);
-  ec_jacobi_mulrdc(&ctx->stride_p, &G1, t);
+  ec_jacobi_mulrdc(&ctx->stride_p, &G1, t); // G * (GROUP_INV_SIZE * gs)
 
   pe g1, g2;
   ec_jacobi_mulrdc(&g1, &G1, ctx->stride_k);
@@ -352,18 +339,18 @@ bool ctx_precompute_gpoints(ctx_t *ctx) {
 
   size_t hsize = GROUP_INV_SIZE / 2;
 
+  // K+1, K+2, .., K+N/2-1
   pe_clone(ctx->gpoints + 0, &g1);
   pe_clone(ctx->gpoints + 1, &g2);
   for (size_t i = 2; i < hsize; ++i) {
     ec_jacobi_addrdc(ctx->gpoints + i, ctx->gpoints + i - 1, &g1);
   }
 
+  // K-1, K-2, .., K-N/2
   for (size_t i = 0; i < hsize; ++i) {
     pe_clone(&ctx->gpoints[hsize + i], &ctx->gpoints[i]);
-    fe_modp_neg(ctx->gpoints[hsize + i].y, ctx->gpoints[i].y);
+    fe_modp_neg(ctx->gpoints[hsize + i].y, ctx->gpoints[i].y); // y = -y
   }
-  
-  return true;
 }
 
 void pk_verify_hash(const fe pk, const h160_t hash, bool c, size_t endo) {
@@ -410,15 +397,25 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
   h160_t hs65[HASH_BATCH_SIZE];
 
   for (size_t i = 0; i < GROUP_INV_SIZE; i += HASH_BATCH_SIZE) {
+    // Check if we should stop
+    if (atomic_load(&ctx->finished)) return;
+    
     if (ctx->check_addr33) addr33_batch(hs33, points + i, HASH_BATCH_SIZE);
     if (ctx->check_addr65) addr65_batch(hs65, points + i, HASH_BATCH_SIZE);
     for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
       if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, i + j, 0);
       if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, i + j, 0);
+      
+      // Exit immediately if key found
+      if (atomic_load(&ctx->finished)) return;
     }
   }
 
   if (!ctx->use_endo) return;
+
+  // https://bitcointalk.org/index.php?topic=5527935.msg65000919#msg65000919
+  // PubKeys  = (x,y) (x,-y) (x*beta,y) (x*beta,-y) (x*beta^2,y) (x*beta^2,-y)
+  // PrivKeys = (pk) (!pk) (pk*alpha) !(pk*alpha) (pk*alpha^2) !(pk*alpha^2)
 
   size_t esize = HASH_BATCH_SIZE * 5;
   pe endos[esize];
@@ -426,27 +423,31 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
 
   size_t ci = 0;
   for (size_t k = 0; k < GROUP_INV_SIZE; ++k) {
+    if (atomic_load(&ctx->finished)) return;
+    
     size_t idx = (k * 5) % esize;
 
-    fe_clone(endos[idx + 0].x, points[k].x);
+    fe_clone(endos[idx + 0].x, points[k].x); // (x, -y)
     fe_modp_neg(endos[idx + 0].y, points[k].y);
 
-    fe_modp_mul(endos[idx + 1].x, points[k].x, B1);
+    fe_modp_mul(endos[idx + 1].x, points[k].x, B1); // (x * beta, y)
     fe_clone(endos[idx + 1].y, points[k].y);
 
-    fe_clone(endos[idx + 2].x, endos[idx + 1].x);
+    fe_clone(endos[idx + 2].x, endos[idx + 1].x); // (x * beta, -y)
     fe_clone(endos[idx + 2].y, endos[idx + 0].y);
 
-    fe_modp_mul(endos[idx + 3].x, points[k].x, B2);
+    fe_modp_mul(endos[idx + 3].x, points[k].x, B2); // (x * beta^2, y)
     fe_clone(endos[idx + 3].y, points[k].y);
 
-    fe_clone(endos[idx + 4].x, endos[idx + 3].x);
+    fe_clone(endos[idx + 4].x, endos[idx + 3].x); // (x * beta^2, -y)
     fe_clone(endos[idx + 4].y, endos[idx + 0].y);
 
     bool is_full = (idx + 5) % esize == 0 || k == GROUP_INV_SIZE - 1;
     if (!is_full) continue;
 
     for (size_t i = 0; i < esize; i += HASH_BATCH_SIZE) {
+      if (atomic_load(&ctx->finished)) return;
+      
       if (ctx->check_addr33) addr33_batch(hs33, endos + i, HASH_BATCH_SIZE);
       if (ctx->check_addr65) addr65_batch(hs65, endos + i, HASH_BATCH_SIZE);
 
@@ -454,6 +455,8 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
         if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, ci / 5, (ci % 5) + 1);
         if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, ci / 5, (ci % 5) + 1);
         ci += 1;
+        
+        if (atomic_load(&ctx->finished)) return;
       }
     }
   }
@@ -464,37 +467,44 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
 void batch_add(ctx_t *ctx, const fe pk, const size_t iterations) {
   size_t hsize = GROUP_INV_SIZE / 2;
 
-  pe bp[GROUP_INV_SIZE];
-  fe dx[hsize];
-  pe GStart;
-  fe ck, rx, ry;
-  fe ss, dd;
+  pe bp[GROUP_INV_SIZE]; // calculated ec points
+  fe dx[hsize];          // delta x for group inversion
+  pe GStart;             // iteration points
+  fe ck, rx, ry;         // current start point; tmp for x3, y3
+  fe ss, dd;             // temp variables
 
+  // set start point to center of the group
   fe_modn_add_stride(ss, pk, ctx->stride_k, hsize);
-  ec_jacobi_mulrdc(&GStart, &G1, ss);
+  ec_jacobi_mulrdc(&GStart, &G1, ss); // G * (pk + hsize * gs)
 
-  fe_clone(ck, pk);
+  // group addition with single inversion (with stride support)
+  // structure: K-N/2 .. K-2 K-1 [K] K+1 K+2 .. K+N/2-1 (last K dropped to have odd size)
+  // points in `bp` already order by `pk` increment
+  fe_clone(ck, pk); // start pk for current iteration
 
   size_t counter = 0;
   while (counter < iterations) {
+    // Check stop flag before each iteration
+    if (atomic_load(&ctx->finished)) return;
+    
     for (size_t i = 0; i < hsize; ++i) fe_modp_sub(dx[i], ctx->gpoints[i].x, GStart.x);
     fe_modp_grpinv(dx, hsize);
 
-    pe_clone(&bp[hsize + 0], &GStart);
+    pe_clone(&bp[hsize + 0], &GStart); // set K value
 
     for (size_t D = 0; D < 2; ++D) {
       bool positive = D == 0;
-      size_t g_idx = positive ? 0 : hsize;
-      size_t g_max = positive ? hsize - 1 : hsize;
+      size_t g_idx = positive ? 0 : hsize; // plus points in first half, minus in second half
+      size_t g_max = positive ? hsize - 1 : hsize; // skip K+N/2, since we don't need it
       for (size_t i = 0; i < g_max; ++i) {
-        fe_modp_sub(ss, ctx->gpoints[g_idx + i].y, GStart.y);
-        fe_modp_mul(ss, ss, dx[i]);
-        fe_modp_sqr(rx, ss);
-        fe_modp_sub(rx, rx, GStart.x);
-        fe_modp_sub(rx, rx, ctx->gpoints[g_idx + i].x);
-        fe_modp_sub(dd, GStart.x, rx);
-        fe_modp_mul(dd, ss, dd);
-        fe_modp_sub(ry, dd, GStart.y);
+        fe_modp_sub(ss, ctx->gpoints[g_idx + i].y, GStart.y); // y2 - y1
+        fe_modp_mul(ss, ss, dx[i]);                           // λ = (y2 - y1) / (x2 - x1)
+        fe_modp_sqr(rx, ss);                                  // λ²
+        fe_modp_sub(rx, rx, GStart.x);                        // λ² - x1
+        fe_modp_sub(rx, rx, ctx->gpoints[g_idx + i].x);       // rx = λ² - x1 - x2
+        fe_modp_sub(dd, GStart.x, rx);                        // x1 - rx
+        fe_modp_mul(dd, ss, dd);                              // λ * (x1 - rx)
+        fe_modp_sub(ry, dd, GStart.y);                        // ry = λ * (x1 - rx) - y1
 
         size_t idx = positive ? hsize + i + 1 : hsize - 1 - i;
         fe_clone(bp[idx].x, rx);
@@ -504,8 +514,14 @@ void batch_add(ctx_t *ctx, const fe pk, const size_t iterations) {
     }
 
     check_found_add(ctx, ck, bp);
-    fe_modn_add_stride(ck, ck, ctx->stride_k, GROUP_INV_SIZE);
-    ec_jacobi_addrdc(&GStart, &GStart, &ctx->stride_p);
+    
+    // Update matrix display in pure random mode
+    if (ctx->pure_random_mode) {
+      update_matrix_keys(ctx, ck);
+    }
+    
+    fe_modn_add_stride(ck, ck, ctx->stride_k, GROUP_INV_SIZE); // move pk to next group START
+    ec_jacobi_addrdc(&GStart, &GStart, &ctx->stride_p);        // move GStart to next group CENTER
     counter += GROUP_INV_SIZE;
   }
 }
@@ -513,9 +529,11 @@ void batch_add(ctx_t *ctx, const fe pk, const size_t iterations) {
 void *cmd_add_worker(void *arg) {
   ctx_t *ctx = (ctx_t *)arg;
 
-  fe initial_r;
+  fe initial_r; // keep initial range start to check overflow
   fe_clone(initial_r, ctx->range_s);
 
+  // job_size multiply by 2^offset (iterate over desired digit order)
+  // for example: 3013 3023 .. 30X3 .. 3093 3103 3113
   fe inc = {0};
   fe_set64(inc, ctx->job_size);
   fe_modn_mul(inc, inc, ctx->stride_k);
@@ -524,7 +542,7 @@ void *cmd_add_worker(void *arg) {
   while (!atomic_load(&ctx->finished)) {
     pthread_mutex_lock(&ctx->lock);
     bool is_overflow = fe_cmp(ctx->range_s, initial_r) < 0;
-    if (fe_cmp(ctx->range_s, ctx->range_e) >= 0 || is_overflow) {
+    if (fe_cmp(ctx->range_s, ctx->range_e) >= 0 || is_overflow || atomic_load(&ctx->finished)) {
       pthread_mutex_unlock(&ctx->lock);
       break;
     }
@@ -535,27 +553,24 @@ void *cmd_add_worker(void *arg) {
 
     batch_add(ctx, pk, ctx->job_size);
     ctx_update(ctx, ctx->use_endo ? ctx->job_size * 6 : ctx->job_size);
+    
+    // Check stop flag after each batch
+    if (atomic_load(&ctx->finished)) break;
   }
 
   return NULL;
 }
 
-bool cmd_add(ctx_t *ctx) {
-  if (!ctx_precompute_gpoints(ctx)) {
-    fprintf(stderr, "[!] failed to precompute G points\n");
-    return false;
-  }
+void cmd_add(ctx_t *ctx) {
+  ctx_precompute_gpoints(ctx);
 
   fe range_size;
   fe_modn_sub(range_size, ctx->range_e, ctx->range_s);
   ctx->job_size = fe_cmp64(range_size, MAX_JOB_SIZE) < 0 ? range_size[0] : MAX_JOB_SIZE;
-  ctx->ts_started = tsnow();
+  ctx->ts_started = tsnow(); // actual start time
 
   for (size_t i = 0; i < ctx->threads_count; ++i) {
-    if (pthread_create(&ctx->threads[i], NULL, cmd_add_worker, ctx) != 0) {
-      fprintf(stderr, "[!] failed to create thread %zu\n", i);
-      return false;
-    }
+    pthread_create(&ctx->threads[i], NULL, cmd_add_worker, ctx);
   }
 
   for (size_t i = 0; i < ctx->threads_count; ++i) {
@@ -563,7 +578,6 @@ bool cmd_add(ctx_t *ctx) {
   }
 
   ctx_finish(ctx);
-  return true;
 }
 
 // MARK: CMD_MUL
@@ -573,6 +587,8 @@ void check_found_mul(ctx_t *ctx, const fe *pk, const pe *cp, size_t cnt) {
   h160_t hs65[HASH_BATCH_SIZE];
 
   for (size_t i = 0; i < cnt; i += HASH_BATCH_SIZE) {
+    if (atomic_load(&ctx->finished)) return;
+    
     size_t batch_size = MIN(HASH_BATCH_SIZE, cnt - i);
     if (ctx->check_addr33) addr33_batch(hs33, cp + i, batch_size);
     if (ctx->check_addr65) addr65_batch(hs65, cp + i, batch_size);
@@ -585,6 +601,8 @@ void check_found_mul(ctx_t *ctx, const fe *pk, const pe *cp, size_t cnt) {
       if (ctx->check_addr65 && ctx_check_hash(ctx, hs65[j])) {
         ctx_write_found(ctx, "addr65", hs65[j], pk[i + j]);
       }
+      
+      if (atomic_load(&ctx->finished)) return;
     }
   }
 }
@@ -597,7 +615,8 @@ typedef struct cmd_mul_job_t {
 void *cmd_mul_worker(void *arg) {
   ctx_t *ctx = (ctx_t *)arg;
 
-  u8 msg[(MAX_LINE_SIZE + 63 + 9) / 64 * 64] = {0};
+  // sha256 routine
+  u8 msg[(MAX_LINE_SIZE + 63 + 9) / 64 * 64] = {0}; // 9 = 1 byte 0x80 + 8 byte bitlen
   u32 res[8] = {0};
 
   fe pk[GROUP_INV_SIZE];
@@ -609,6 +628,7 @@ void *cmd_mul_worker(void *arg) {
     job = queue_get(&ctx->queue);
     if (job == NULL) break;
 
+    // parse private keys from hex string
     if (!ctx->raw_text) {
       for (size_t i = 0; i < job->count; ++i) fe_modn_from_hex(pk[i], job->lines[i]);
     } else {
@@ -616,6 +636,7 @@ void *cmd_mul_worker(void *arg) {
         size_t len = strlen(job->lines[i]);
         size_t msg_size = (len + 63 + 9) / 64 * 64;
 
+        // calculate sha256 hash
         size_t bitlen = len * 8;
         memcpy(msg, job->lines[i], len);
         memset(msg + len, 0, msg_size - len);
@@ -630,6 +651,7 @@ void *cmd_mul_worker(void *arg) {
       }
     }
 
+    // compute public keys in batch
     for (size_t i = 0; i < job->count; ++i) ec_gtable_mul(&cp[i], pk[i]);
     ec_jacobi_grprdc(cp, job->count);
 
@@ -641,22 +663,17 @@ void *cmd_mul_worker(void *arg) {
   return NULL;
 }
 
-bool cmd_mul(ctx_t *ctx) {
+void cmd_mul(ctx_t *ctx) {
   ec_gtable_init();
 
   for (size_t i = 0; i < ctx->threads_count; ++i) {
-    if (pthread_create(&ctx->threads[i], NULL, cmd_mul_worker, ctx) != 0) {
-      fprintf(stderr, "[!] failed to create thread %zu\n", i);
-      return false;
-    }
+    pthread_create(&ctx->threads[i], NULL, cmd_mul_worker, ctx);
   }
 
   cmd_mul_job_t *job = calloc(1, sizeof(cmd_mul_job_t));
-  if (!job) return false;
-  
   char line[MAX_LINE_SIZE];
 
-  while (fgets(line, sizeof(line), stdin) != NULL) {
+  while (fgets(line, sizeof(line), stdin) != NULL && !atomic_load(&ctx->finished)) {
     size_t len = strlen(line);
     if (len && line[len - 1] == '\n') line[--len] = '\0';
     if (len && line[len - 1] == '\r') line[--len] = '\0';
@@ -666,14 +683,11 @@ bool cmd_mul(ctx_t *ctx) {
     if (job->count == GROUP_INV_SIZE) {
       queue_put(&ctx->queue, job);
       job = calloc(1, sizeof(cmd_mul_job_t));
-      if (!job) break;
     }
   }
 
-  if (job && job->count > 0 && job->count != GROUP_INV_SIZE) {
+  if (job->count > 0 && job->count != GROUP_INV_SIZE) {
     queue_put(&ctx->queue, job);
-  } else if (job) {
-    free(job);
   }
 
   queue_done(&ctx->queue);
@@ -683,31 +697,34 @@ bool cmd_mul(ctx_t *ctx) {
   }
 
   ctx_finish(ctx);
-  return true;
 }
 
 // MARK: CMD_RND
 
 void gen_random_range(ctx_t *ctx, const fe a, const fe b) {
+  fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
+  fe_clone(ctx->range_e, ctx->range_s);
+  
+  // Pure random mode (-d 0:0): generate small chunk for thread distribution
   if (ctx->ord_size == 0) {
-    fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
-    fe_clone(ctx->range_e, ctx->range_s);
-    
     fe chunk_size;
     fe_set64(chunk_size, ctx->threads_count * ctx->job_size);
     fe_modn_add(ctx->range_e, ctx->range_s, chunk_size);
     
-    if (fe_cmp(ctx->range_e, b) > 0) fe_clone(ctx->range_e, b);
+    // Make sure we don't exceed bounds
+    if (fe_cmp(ctx->range_e, b) > 0) {
+      fe_clone(ctx->range_e, b);
+    }
     return;
   }
-
-  fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
-  fe_clone(ctx->range_e, ctx->range_s);
+  
+  // Regular random mode with bit ranges
   for (u32 i = ctx->ord_offs; i < (ctx->ord_offs + ctx->ord_size); ++i) {
     ctx->range_s[i / 64] &= ~(1ULL << (i % 64));
     ctx->range_e[i / 64] |= 1ULL << (i % 64);
   }
 
+  // put in bounds
   if (fe_cmp(ctx->range_s, a) <= 0) fe_clone(ctx->range_s, a);
   if (fe_cmp(ctx->range_e, b) >= 0) fe_clone(ctx->range_e, b);
 }
@@ -738,498 +755,68 @@ void print_range_mask(fe range_s, u32 bits_size, u32 offset, bool use_color) {
   putchar('\n');
 }
 
-bool cmd_rnd(ctx_t *ctx) {
+void cmd_rnd(ctx_t *ctx) {
   ctx->ord_offs = MIN(ctx->ord_offs, 255 - ctx->ord_size);
   
-  if (!ctx_precompute_gpoints(ctx)) {
-    fprintf(stderr, "[!] failed to precompute G points\n");
-    return false;
+  if (ctx->pure_random_mode) {
+    printf("[PURE RANDOM MODE] - Matrix Display Enabled\n");
+    printf("Threads: %zu | Address: %s%s\n\n", 
+           ctx->threads_count, 
+           ctx->check_addr33 ? "compressed" : "", 
+           ctx->check_addr65 ? "uncompressed" : "");
+  } else {
+    printf("[RANDOM MODE] offs: %d ~ bits: %d\n\n", ctx->ord_offs, ctx->ord_size);
   }
-  
+
+  ctx_precompute_gpoints(ctx);
   ctx->job_size = MAX_JOB_SIZE;
-  ctx->ts_started = tsnow();
+  ctx->ts_started = tsnow(); // actual start time
 
   fe range_s, range_e;
   fe_clone(range_s, ctx->range_s);
   fe_clone(range_e, ctx->range_e);
 
+  size_t last_c = 0, last_f = 0, s_time = 0;
   while (!atomic_load(&ctx->finished)) {
+    last_c = atomic_load(&ctx->k_checked);
+    last_f = atomic_load(&ctx->k_found);
+    s_time = tsnow();
+
     gen_random_range(ctx, range_s, range_e);
+    
+    if (!ctx->pure_random_mode) {
+      print_range_mask(ctx->range_s, ctx->ord_size, ctx->ord_offs, ctx->use_color);
+      print_range_mask(ctx->range_e, ctx->ord_size, ctx->ord_offs, ctx->use_color);
+    }
+    
     ctx_print_status(ctx);
 
+    // if full range is used, skip break after first iteration
     bool is_full = fe_cmp(ctx->range_s, range_s) == 0 && fe_cmp(ctx->range_e, range_e) == 0;
 
     for (size_t i = 0; i < ctx->threads_count; ++i) {
-      if (pthread_create(&ctx->threads[i], NULL, cmd_add_worker, ctx) != 0) {
-        fprintf(stderr, "[!] failed to create thread %zu\n", i);
-        return false;
-      }
+      pthread_create(&ctx->threads[i], NULL, cmd_add_worker, ctx);
     }
 
     for (size_t i = 0; i < ctx->threads_count; ++i) {
       pthread_join(ctx->threads[i], NULL);
     }
-    
+
+    // Exit if key found
+    if (atomic_load(&ctx->finished)) break;
+
+    if (!ctx->pure_random_mode) {
+      size_t dc = atomic_load(&ctx->k_checked) - last_c;
+      size_t df = atomic_load(&ctx->k_found) - last_f;
+      double dt = MAX((tsnow() - s_time), 1ul) / 1000.0;
+      term_clear_line();
+      printf("%'zu / %'zu ~ %.1fs\n\n", df, dc, dt);
+    }
+
     if (is_full) break;
   }
 
   ctx_finish(ctx);
-  return true;
-}
-
-// MARK: CMD_SCAN (Enhanced Matrix Scanner)
-
-void draw_keyhunt_progress_bar(double progress, int width) {
-  int filled = (int)(progress * width);
-  printf("[");
-  for (int i = 0; i < width; i++) {
-    if (i < filled) printf("=");
-    else printf(" ");
-  }
-  printf("] %.2f%%", progress * 100);
-}
-
-void draw_matrix_scanner(ctx_t *ctx) {
-  int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
-  double dt = MAX(1, effective_time) / 1000.0;
-  double avg_speed = atomic_load(&ctx->k_checked) / dt / 1000000;
-  
-  // Calculate instantaneous speed
-  double instant_speed = 0.0;
-  size_t ts = tsnow();
-  if (ctx->last_k_timestamp > 0 && (ts - ctx->last_k_timestamp) > 0) {
-    double time_diff = (ts - ctx->last_k_timestamp) / 1000.0;
-    instant_speed = (atomic_load(&ctx->k_checked) - ctx->last_k_checked) / time_diff / 1000000;
-  }
-  
-  // Calculate ETA
-  double eta_seconds = 0.0;
-  if (ctx->scan_total_range > 0 && avg_speed > 0) {
-    size_t remaining = ctx->scan_total_range - atomic_load(&ctx->k_checked);
-    eta_seconds = remaining / (avg_speed * 1000000);
-  }
-  
-  double progress = 0.0;
-  if (ctx->scan_total_range > 0) {
-    progress = (double)atomic_load(&ctx->k_checked) / (double)ctx->scan_total_range;
-    if (progress > 1.0) progress = 1.0;
-  }
-  
-  // Color coding
-  const char *status_color = "\033[1;32m";
-  const char *status_text = "OPTIMAL";
-  if (avg_speed < 0.05) {
-    status_color = "\033[1;31m";
-    status_text = "SLOW";
-  } else if (avg_speed < 0.1) {
-    status_color = "\033[1;33m";
-    status_text = "MODERATE";
-  }
-  
-  printf("\033[2J\033[H");
-  
-  // Enhanced header
-  printf("%s╔═══════════════════════════════════════════════════════════════════╗\033[0m\n", status_color);
-  printf("%s║ STATUS: %-10s                                                 ║\033[0m\n", status_color, status_text);
-  printf("%s╚═══════════════════════════════════════════════════════════════════╝\033[0m\n\n", status_color);
-  
-  // Range position
-  if (strlen(ctx->matrix_keys[0]) > 0) {
-    printf("RANGE: %016llx%016llx → \033[1;36m%s\033[0m → %016llx%016llx\n\n",
-           ctx->range_s[3], ctx->range_s[2],
-           ctx->matrix_keys[0] + 32,
-           ctx->range_e[3], ctx->range_e[2]);
-  }
-  
-  if (strlen(ctx->matrix_keys[0]) > 0) {
-    printf("SCANNING KEY: \033[1;37m%s\033[0m\n", ctx->matrix_keys[0]);
-  } else {
-    printf("SCANNING KEY: initializing...\n");
-  }
-  
-  // Enhanced statistics
-  printf("SPEED (AVG): \033[1;32m%.2f\033[0m MKeys/s  |  ", avg_speed);
-  printf("SPEED (NOW): \033[1;36m%.2f\033[0m MKeys/s\n", instant_speed);
-  printf("TOTAL SCANNED: \033[1;33m%'llu\033[0m keys\n", (unsigned long long)atomic_load(&ctx->k_checked));
-  
-  // ETA
-  if (eta_seconds > 0 && eta_seconds < 86400 * 365) {
-    int eta_hours = (int)(eta_seconds / 3600);
-    int eta_mins = (int)((eta_seconds - eta_hours * 3600) / 60);
-    int eta_secs = (int)(eta_seconds - eta_hours * 3600 - eta_mins * 60);
-    printf("ETA: \033[1;35m%02d:%02d:%02d\033[0m\n", eta_hours, eta_mins, eta_secs);
-  }
-  
-  printf("\n");
-  
-  // Matrix scrolling
-  for (int i = 0; i < 10; i++) {
-    if (strlen(ctx->matrix_keys[i]) > 0) {
-      int color = 46 - (i * 2);
-      printf("\033[38;5;%dm%s\033[0m\n", color, ctx->matrix_keys[i]);
-    } else {
-      printf("\n");
-    }
-  }
-  
-  printf("\n");
-  printf("Progress: ");
-  draw_keyhunt_progress_bar(progress, 40);
-  printf(" | Threads: %zu\n", ctx->threads_count);
-  
-  fflush(stdout);
-  
-  // Update instantaneous speed measurement
-  if ((ts - ctx->last_k_timestamp) >= 1000) {
-    ctx->last_k_checked = atomic_load(&ctx->k_checked);
-    ctx->last_k_timestamp = ts;
-  }
-  
-  // Logging
-  if (ctx->logfile != NULL) {
-    fprintf(ctx->logfile, "[%zu] Keys: %llu | Speed: %.2f MKeys/s | Progress: %.2f%%\n",
-            ts, (unsigned long long)atomic_load(&ctx->k_checked), avg_speed, progress * 100);
-    fflush(ctx->logfile);
-  }
-}
-
-void update_matrix_display(ctx_t *ctx, const fe pk) {
-  for (int i = 9; i > 0; i--) {
-    strcpy(ctx->matrix_keys[i], ctx->matrix_keys[i-1]);
-  }
-  
-  snprintf(ctx->matrix_keys[0], 65, "%016llx%016llx%016llx%016llx", 
-           pk[3], pk[2], pk[1], pk[0]);
-}
-
-void save_session(ctx_t *ctx) {
-  if (strlen(ctx->session_file) > 0) {
-    FILE *f = fopen(ctx->session_file, "w");
-    if (f) {
-      fprintf(f, "%016llx%016llx%016llx%016llx\n", 
-              ctx->current_scan_pos[3], ctx->current_scan_pos[2],
-              ctx->current_scan_pos[1], ctx->current_scan_pos[0]);
-      fprintf(f, "%llu\n", (unsigned long long)atomic_load(&ctx->k_checked));
-      fclose(f);
-    }
-  }
-}
-
-void ctx_scan_update(ctx_t *ctx, size_t k_checked, const fe current_pk) {
-  size_t ts = tsnow();
-  
-  pthread_mutex_lock(&ctx->lock);
-  
-  atomic_fetch_add(&ctx->k_checked, k_checked);
-  ctx->ts_updated = ts;
-  
-  fe_clone(ctx->current_scan_pos, current_pk);
-  
-  if ((ts - ctx->ts_printed) >= 100) {
-    update_matrix_display(ctx, current_pk);
-    ctx->ts_printed = ts;
-    draw_matrix_scanner(ctx);
-    save_session(ctx);
-  }
-  
-  if (atomic_load(&ctx->k_found) > 0) {
-    atomic_store(&ctx->finished, true);
-  }
-  
-  pthread_mutex_unlock(&ctx->lock);
-  
-  ctx_check_paused(ctx);
-}
-
-void check_found_scan(ctx_t *ctx, fe const start_pk, const pe *points) {
-  h160_t hs33[HASH_BATCH_SIZE];
-  h160_t hs65[HASH_BATCH_SIZE];
-
-  for (size_t i = 0; i < GROUP_INV_SIZE; i += HASH_BATCH_SIZE) {
-    if (ctx->check_addr33) addr33_batch(hs33, points + i, HASH_BATCH_SIZE);
-    if (ctx->check_addr65) addr65_batch(hs65, points + i, HASH_BATCH_SIZE);
-    for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
-      if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, i + j, 0);
-      if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, i + j, 0);
-      
-      if (atomic_load(&ctx->stop_on_found) && atomic_load(&ctx->k_found) > 0) {
-        return;
-      }
-    }
-  }
-
-  if (!ctx->use_endo) return;
-
-  size_t esize = HASH_BATCH_SIZE * 5;
-  pe endos[esize];
-  for (size_t i = 0; i < esize; ++i) fe_set64(endos[i].z, 1);
-
-  size_t ci = 0;
-  for (size_t k = 0; k < GROUP_INV_SIZE; ++k) {
-    size_t idx = (k * 5) % esize;
-
-    fe_clone(endos[idx + 0].x, points[k].x);
-    fe_modp_neg(endos[idx + 0].y, points[k].y);
-
-    fe_modp_mul(endos[idx + 1].x, points[k].x, B1);
-    fe_clone(endos[idx + 1].y, points[k].y);
-
-    fe_clone(endos[idx + 2].x, endos[idx + 1].x);
-    fe_clone(endos[idx + 2].y, endos[idx + 0].y);
-
-    fe_modp_mul(endos[idx + 3].x, points[k].x, B2);
-    fe_clone(endos[idx + 3].y, points[k].y);
-
-    fe_clone(endos[idx + 4].x, endos[idx + 3].x);
-    fe_clone(endos[idx + 4].y, endos[idx + 0].y);
-
-    bool is_full = (idx + 5) % esize == 0 || k == GROUP_INV_SIZE - 1;
-    if (!is_full) continue;
-
-    for (size_t i = 0; i < esize; i += HASH_BATCH_SIZE) {
-      if (ctx->check_addr33) addr33_batch(hs33, endos + i, HASH_BATCH_SIZE);
-      if (ctx->check_addr65) addr65_batch(hs65, endos + i, HASH_BATCH_SIZE);
-
-      for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
-        if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, ci / 5, (ci % 5) + 1);
-        if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, ci / 5, (ci % 5) + 1);
-        ci += 1;
-        
-        if (atomic_load(&ctx->stop_on_found) && atomic_load(&ctx->k_found) > 0) {
-          return;
-        }
-      }
-    }
-  }
-
-  assert(ci == GROUP_INV_SIZE * 5);
-}
-
-void batch_scan(ctx_t *ctx, const fe pk, const size_t iterations) {
-  size_t hsize = GROUP_INV_SIZE / 2;
-
-  pe bp[GROUP_INV_SIZE];
-  fe dx[hsize];
-  pe GStart;
-  fe ck, rx, ry;
-  fe ss, dd;
-
-  fe_modn_add_stride(ss, pk, ctx->stride_k, hsize);
-  ec_jacobi_mulrdc(&GStart, &G1, ss);
-
-  fe_clone(ck, pk);
-
-  size_t counter = 0;
-  while (counter < iterations) {
-    if (atomic_load(&ctx->finished)) return;
-    
-    for (size_t i = 0; i < hsize; ++i) fe_modp_sub(dx[i], ctx->gpoints[i].x, GStart.x);
-    fe_modp_grpinv(dx, hsize);
-
-    pe_clone(&bp[hsize + 0], &GStart);
-
-    for (size_t D = 0; D < 2; ++D) {
-      bool positive = D == 0;
-      size_t g_idx = positive ? 0 : hsize;
-      size_t g_max = positive ? hsize - 1 : hsize;
-      for (size_t i = 0; i < g_max; ++i) {
-        fe_modp_sub(ss, ctx->gpoints[g_idx + i].y, GStart.y);
-        fe_modp_mul(ss, ss, dx[i]);
-        fe_modp_sqr(rx, ss);
-        fe_modp_sub(rx, rx, GStart.x);
-        fe_modp_sub(rx, rx, ctx->gpoints[g_idx + i].x);
-        fe_modp_sub(dd, GStart.x, rx);
-        fe_modp_mul(dd, ss, dd);
-        fe_modp_sub(ry, dd, GStart.y);
-
-        size_t idx = positive ? hsize + i + 1 : hsize - 1 - i;
-        fe_clone(bp[idx].x, rx);
-        fe_clone(bp[idx].y, ry);
-        fe_set64(bp[idx].z, 0x1);
-      }
-    }
-
-    check_found_scan(ctx, ck, bp);
-    ctx_scan_update(ctx, GROUP_INV_SIZE, ck);
-    
-    if (atomic_load(&ctx->finished)) return;
-    
-    fe_modn_add_stride(ck, ck, ctx->stride_k, GROUP_INV_SIZE);
-    ec_jacobi_addrdc(&GStart, &GStart, &ctx->stride_p);
-    counter += GROUP_INV_SIZE;
-  }
-}
-
-void *cmd_scan_worker(void *arg) {
-  ctx_t *ctx = (ctx_t *)arg;
-
-  fe initial_r;
-  fe_clone(initial_r, ctx->range_s);
-
-  fe inc = {0};
-  fe_set64(inc, ctx->job_size);
-  fe_modn_mul(inc, inc, ctx->stride_k);
-
-  fe pk;
-  while (!atomic_load(&ctx->finished)) {
-    pthread_mutex_lock(&ctx->lock);
-    bool is_overflow = fe_cmp(ctx->range_s, initial_r) < 0;
-    if (fe_cmp(ctx->range_s, ctx->range_e) >= 0 || is_overflow) {
-      pthread_mutex_unlock(&ctx->lock);
-      break;
-    }
-
-    fe_clone(pk, ctx->range_s);
-    fe_modn_add(ctx->range_s, ctx->range_s, inc);
-    pthread_mutex_unlock(&ctx->lock);
-
-    batch_scan(ctx, pk, ctx->job_size);
-    
-    if (atomic_load(&ctx->stop_on_found) && atomic_load(&ctx->k_found) > 0) {
-      break;
-    }
-  }
-
-  return NULL;
-}
-
-void load_session(ctx_t *ctx) {
-  if (strlen(ctx->session_file) > 0 && ctx->load_session) {
-    FILE *f = fopen(ctx->session_file, "r");
-    if (f) {
-      char line[128];
-      if (fgets(line, sizeof(line), f)) {
-        fe_modn_from_hex(ctx->range_s, line);
-        fprintf(stderr, "[SESSION] Resumed from: %s", line);
-      }
-      if (fgets(line, sizeof(line), f)) {
-        size_t prev_checked = strtoull(line, NULL, 10);
-        atomic_store(&ctx->k_checked, prev_checked);
-        fprintf(stderr, "[SESSION] Previous keys scanned: %llu\n", 
-                (unsigned long long)prev_checked);
-      }
-      fclose(f);
-    }
-  }
-}
-
-bool cmd_scan(ctx_t *ctx) {
-  atomic_store(&ctx->stop_on_found, true);
-  
-  for (int i = 0; i < 10; i++) {
-    ctx->matrix_keys[i][0] = '\0';
-  }
-  
-  ctx->last_k_checked = 0;
-  ctx->last_k_timestamp = tsnow();
-  fe_set64(ctx->current_scan_pos, 0);
-  
-  load_session(ctx);
-  
-  fe range_size;
-  fe_modn_sub(range_size, ctx->range_e, ctx->range_s);
-  ctx->scan_total_range = range_size[0];
-  
-  if (!ctx_precompute_gpoints(ctx)) {
-    fprintf(stderr, "[!] failed to precompute G points\n");
-    return false;
-  }
-
-  fe_modn_sub(range_size, ctx->range_e, ctx->range_s);
-  ctx->job_size = fe_cmp64(range_size, MAX_JOB_SIZE) < 0 ? range_size[0] : MAX_JOB_SIZE;
-  ctx->ts_started = tsnow();
-  ctx->ts_printed = ctx->ts_started;
-
-  draw_matrix_scanner(ctx);
-
-  for (size_t i = 0; i < ctx->threads_count; ++i) {
-    if (pthread_create(&ctx->threads[i], NULL, cmd_scan_worker, ctx) != 0) {
-      fprintf(stderr, "[!] failed to create thread %zu\n", i);
-      return false;
-    }
-  }
-
-  for (size_t i = 0; i < ctx->threads_count; ++i) {
-    pthread_join(ctx->threads[i], NULL);
-  }
-
-  pthread_mutex_lock(&ctx->lock);
-  atomic_store(&ctx->finished, true);
-  pthread_mutex_unlock(&ctx->lock);
-  
-  // Final metrics
-  int64_t effective_time = (int64_t)(tsnow() - ctx->ts_started) - (int64_t)ctx->paused_time;
-  double elapsed_sec = MAX(1, effective_time) / 1000.0;
-  double avg_kps = atomic_load(&ctx->k_checked) / elapsed_sec / 1000000;
-  
-  int elapsed_hours = (int)(elapsed_sec / 3600);
-  int elapsed_mins = (int)((elapsed_sec - elapsed_hours * 3600) / 60);
-  int elapsed_secs = (int)(elapsed_sec - elapsed_hours * 3600 - elapsed_mins * 60);
-  
-  printf("\033[2J\033[H");
-  
-  if (atomic_load(&ctx->k_found) > 0) {
-    // Audio notification
-    if (ctx->enable_beep) {
-      printf("\a\a\a");
-      fflush(stdout);
-    }
-    
-    printf("\n");
-    printf("\033[1;32m╔════════════════════════════════════════════════════════════════╗\033[0m\n");
-    printf("\033[1;32m║                      [ KEY FOUND ]                             ║\033[0m\n");
-    printf("\033[1;32m╚════════════════════════════════════════════════════════════════╝\033[0m\n");
-    printf("\n");
-    
-    if (strlen(ctx->matrix_keys[0]) > 0) {
-      printf("\033[1;33m0x%s\033[0m\n", ctx->matrix_keys[0]);
-    }
-    
-    if (ctx->outfile != NULL && ctx->outfile != stdout) {
-      fflush(ctx->outfile);
-      fclose(ctx->outfile);
-      ctx->outfile = NULL;
-      printf("\033[1;32m✓\033[0m Result saved to output file\n");
-    }
-    
-    printf("\033[1;36mTime elapsed:\033[0m %02d:%02d:%02d\n", elapsed_hours, elapsed_mins, elapsed_secs);
-    printf("\033[1;36mTotal scanned:\033[0m %'llu keys\n", (unsigned long long)atomic_load(&ctx->k_checked));
-    printf("\033[1;36mAverage speed:\033[0m %.2f MKeys/s\n", avg_kps);
-    printf("\033[1;32mExiting...\033[0m\n");
-    fflush(stdout);
-    
-    // Cleanup session file
-    if (strlen(ctx->session_file) > 0) {
-      remove(ctx->session_file);
-    }
-    
-    if (ctx->logfile != NULL) {
-      fprintf(ctx->logfile, "[SUCCESS] Key found: 0x%s\n", ctx->matrix_keys[0]);
-      fprintf(ctx->logfile, "[SUCCESS] Total scanned: %llu keys\n", 
-              (unsigned long long)atomic_load(&ctx->k_checked));
-      fclose(ctx->logfile);
-      ctx->logfile = NULL;
-    }
-    
-    exit(0);
-  } else {
-    printf("\n\033[1;33mScan complete. No keys found.\033[0m\n");
-    printf("Time elapsed: %02d:%02d:%02d\n", elapsed_hours, elapsed_mins, elapsed_secs);
-    printf("Total scanned: %'llu keys\n", (unsigned long long)atomic_load(&ctx->k_checked));
-    printf("Average speed: %.2f MKeys/s\n", avg_kps);
-    fflush(stdout);
-    
-    if (ctx->outfile != NULL && ctx->outfile != stdout) {
-      fclose(ctx->outfile);
-      ctx->outfile = NULL;
-    }
-    if (ctx->logfile != NULL) {
-      fclose(ctx->logfile);
-      ctx->logfile = NULL;
-    }
-  }
-  
-  return true;
 }
 
 // MARK: args helpers
@@ -1304,14 +891,16 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
     exit(1);
   }
 
-  if (tmp_size == 0) {
+  // Allow -d 0:0 for pure random mode
+  if (tmp_size == 0 && tmp_offs == 0) {
     ctx->ord_offs = 0;
     ctx->ord_size = 0;
+    ctx->pure_random_mode = true;
     return;
   }
 
   if (tmp_size < MIN_SIZE || tmp_size > MAX_SIZE) {
-    fprintf(stderr, "invalid size, min is %d and max is %d (or 0 for pure random mode)\n", MIN_SIZE, MAX_SIZE);
+    fprintf(stderr, "invalid size, min is %d and max is %d (or use -d 0:0 for pure random mode)\n", MIN_SIZE, MAX_SIZE);
     exit(1);
   }
 
@@ -1328,7 +917,6 @@ void usage(const char *name) {
   printf("  add             - search in given range with batch addition\n");
   printf("  mul             - search hex encoded private keys (from stdin)\n");
   printf("  rnd             - search random range of bits in given range\n");
-  printf("  scan            - custom Bitcoin scanner with Matrix-style UI\n");
   printf("\nCompute options:\n");
   printf("  -f <file>       - filter file to search (list of hashes or bloom fitler)\n");
   printf("  -o <file>       - output file to write found keys (default: stdout)\n");
@@ -1336,14 +924,9 @@ void usage(const char *name) {
   printf("  -a <addr_type>  - address type to search: c - addr33, u - addr65 (default: c)\n");
   printf("  -r <range>      - search range in hex format (example: 8000:ffff, default all)\n");
   printf("  -d <offs:size>  - bit offset and size for search (example: 128:32, default: 0:32)\n");
-  printf("                    use -d 0:0 for pure random mode (no chunking)\n");
+  printf("                    use -d 0:0 for PURE RANDOM mode with Matrix display\n");
   printf("  -q              - quiet mode (no output to stdout; -o required)\n");
   printf("  -endo           - use endomorphism (default: false)\n");
-  printf("\nScan command enhanced options:\n");
-  printf("  --beep          - enable audio notification on key found\n");
-  printf("  --log <file>    - write detailed scan log to file\n");
-  printf("  --session <file>- save/resume scan position (use with Ctrl+C)\n");
-  printf("  --resume        - resume from last saved session\n");
   printf("\nOther commands:\n");
   printf("  blf-gen         - create bloom filter from list of hex-encoded hash160\n");
   printf("  blf-check       - check bloom filter for given hex-encoded hash160\n");
@@ -1352,37 +935,29 @@ void usage(const char *name) {
   printf("\n");
 }
 
-bool init(ctx_t *ctx, args_t *args) {
-  memset(ctx, 0, sizeof(ctx_t));
-  
+void init(ctx_t *ctx, args_t *args) {
+  // check other commands first
   if (args->argc > 1) {
-    if (strcmp(args->argv[1], "blf-gen") == 0) { blf_gen(args); return false; }
-    if (strcmp(args->argv[1], "blf-check") == 0) { blf_check(args); return false; }
-    if (strcmp(args->argv[1], "bench") == 0) { run_bench(); return false; }
-    if (strcmp(args->argv[1], "bench-gtable") == 0) { run_bench_gtable(); return false; }
-    if (strcmp(args->argv[1], "mult-verify") == 0) { mult_verify(); return false; }
+    if (strcmp(args->argv[1], "blf-gen") == 0) return blf_gen(args);
+    if (strcmp(args->argv[1], "blf-check") == 0) return blf_check(args);
+    if (strcmp(args->argv[1], "bench") == 0) return run_bench();
+    if (strcmp(args->argv[1], "bench-gtable") == 0) return run_bench_gtable();
+    if (strcmp(args->argv[1], "mult-verify") == 0) return mult_verify();
   }
 
   ctx->use_color = isatty(fileno(stdout));
 
-  ctx->cmd = CMD_NIL;
+  ctx->cmd = CMD_NIL; // default show help
   if (args->argc > 1) {
     if (strcmp(args->argv[1], "add") == 0) ctx->cmd = CMD_ADD;
     if (strcmp(args->argv[1], "mul") == 0) ctx->cmd = CMD_MUL;
     if (strcmp(args->argv[1], "rnd") == 0) ctx->cmd = CMD_RND;
-    if (strcmp(args->argv[1], "scan") == 0) ctx->cmd = CMD_SCAN;
   }
 
   if (ctx->cmd == CMD_NIL) {
     if (args_bool(args, "-v")) printf("ecloop v%s\n", VERSION);
     else usage(args->argv[0]);
-    return false;
-  }
-
-  if (pthread_mutex_init(&ctx->lock, NULL) != 0 || 
-      pthread_cond_init(&ctx->pause_cond, NULL) != 0) {
-    fprintf(stderr, "failed to initialize synchronization primitives\n");
-    return false;
+    exit(0);
   }
 
   ctx->has_seed = false;
@@ -1394,26 +969,15 @@ bool init(ctx_t *ctx, args_t *args) {
   }
 
   char *path = arg_str(args, "-f");
-  if (!load_filter(ctx, path)) {
-    fprintf(stderr, "failed to load filter file\n");
-    return false;
-  }
+  load_filter(ctx, path);
 
   ctx->quiet = args_bool(args, "-q");
   char *outfile = arg_str(args, "-o");
-  if (outfile) {
-    ctx->outfile = fopen(outfile, "a");
-    if (!ctx->outfile) {
-      fprintf(stderr, "failed to open output file: %s\n", outfile);
-      return false;
-    }
-  } else {
-    ctx->outfile = stdout;
-  }
+  if (outfile) ctx->outfile = fopen(outfile, "a");
 
   if (outfile == NULL && ctx->quiet) {
     fprintf(stderr, "quiet mode chosen without output file\n");
-    return false;
+    exit(1);
   }
 
   char *addr = arg_str(args, "-a");
@@ -1423,145 +987,94 @@ bool init(ctx_t *ctx, args_t *args) {
   }
 
   if (!ctx->check_addr33 && !ctx->check_addr65) {
-    ctx->check_addr33 = true;
+    ctx->check_addr33 = true; // default to addr33
   }
 
   ctx->use_endo = args_bool(args, "-endo");
-  if (ctx->cmd == CMD_MUL) ctx->use_endo = false;
+  if (ctx->cmd == CMD_MUL) ctx->use_endo = false; // no endo for mul command
 
+  pthread_mutex_init(&ctx->lock, NULL);
   int cpus = get_cpu_count();
   ctx->threads_count = MIN(MAX(args_uint(args, "-t", cpus), 1ul), 320ul);
   ctx->threads = malloc(ctx->threads_count * sizeof(pthread_t));
-  if (!ctx->threads) {
-    fprintf(stderr, "failed to allocate threads\n");
-    return false;
-  }
-  
   atomic_store(&ctx->finished, false);
-  atomic_store(&ctx->paused, false);
   atomic_store(&ctx->k_checked, 0);
   atomic_store(&ctx->k_found, 0);
-  atomic_store(&ctx->pure_random_view, false);
-  atomic_store(&ctx->stop_on_found, false);
-  
   ctx->ts_started = tsnow();
   ctx->ts_updated = ctx->ts_started;
   ctx->ts_printed = ctx->ts_started - 5e3;
   ctx->paused_time = 0;
+  ctx->paused = false;
+
+  // Initialize matrix display BEFORE load_offs_size
+  ctx->pure_random_mode = false;
+  ctx->matrix_index = 0;
+  ctx->current_key[0] = '\0';
+  for (int i = 0; i < 10; i++) {
+    ctx->matrix_keys[i][0] = '\0';
+  }
 
   arg_search_range(args, ctx->range_s, ctx->range_e);
-  load_offs_size(ctx, args);
+  load_offs_size(ctx, args);  // This will set pure_random_mode if -d 0:0
   queue_init(&ctx->queue, ctx->threads_count * 3);
 
-  atomic_store(&ctx->pure_random_view, (ctx->ord_size == 0 && ctx->cmd == CMD_RND));
-  ctx->tid = 0;
-  
-  safe_strcpy(ctx->sample_key, 
-             "0000000000000000000000000000000000000000000000000000000000000000",
-             sizeof(ctx->sample_key));
+  if (!ctx->pure_random_mode) {
+    printf("threads: %zu ~ addr33: %d ~ addr65: %d ~ endo: %d | filter: ", //
+           ctx->threads_count, ctx->check_addr33, ctx->check_addr65, ctx->use_endo);
+
+    if (ctx->to_find_hashes != NULL) printf("list (%'zu)\n", ctx->to_find_count);
+    else printf("bloom\n");
+
+    if (ctx->cmd == CMD_ADD) {
+      fe_print("range_s", ctx->range_s);
+      fe_print("range_e", ctx->range_e);
+    }
+
+    printf("----------------------------------------\n");
+  }
 
   if (ctx->cmd == CMD_MUL) {
     ctx->raw_text = args_bool(args, "-raw");
   }
-  
-  ctx->target_address[0] = '\0';
-  ctx->matrix_index = 0;
-  ctx->scan_total_range = 0;
-  
-  // Enhanced features
-  ctx->enable_beep = args_bool(args, "--beep");
-  ctx->load_session = args_bool(args, "--resume");
-  ctx->logfile = NULL;
-  ctx->session_file[0] = '\0';
-  
-  if (ctx->cmd == CMD_SCAN) {
-    char *logfile = arg_str(args, "--log");
-    if (logfile) {
-      ctx->logfile = fopen(logfile, "a");
-      if (ctx->logfile) {
-        fprintf(ctx->logfile, "\n[START] Scan started at timestamp %llu\n", (unsigned long long)tsnow());
-        fprintf(ctx->logfile, "[CONFIG] Threads: %zu\n", ctx->threads_count);
-        fprintf(ctx->logfile, "[CONFIG] Range: %016llx%016llx -> %016llx%016llx\n",
-                ctx->range_s[3], ctx->range_s[2], ctx->range_e[3], ctx->range_e[2]);
-        fflush(ctx->logfile);
-      }
-    }
-    
-    char *sessionfile = arg_str(args, "--session");
-    if (sessionfile) {
-      safe_strcpy(ctx->session_file, sessionfile, sizeof(ctx->session_file));
-    } else if (ctx->load_session) {
-      snprintf(ctx->session_file, sizeof(ctx->session_file), ".eclooprnd_session.dat");
-    }
-  }
-  
-  return true;
 }
 
 void handle_sigint(int sig) {
   fflush(stderr);
   fflush(stdout);
   printf("\n");
-  
-  if (global_ctx != NULL && global_ctx->cmd == CMD_SCAN) {
-    save_session(global_ctx);
-    printf("\033[1;33m[SESSION] Progress saved to: %s\033[0m\n", global_ctx->session_file);
-    printf("\033[1;33m[SESSION] Resume with: --session %s --resume\033[0m\n", global_ctx->session_file);
-    
-    if (global_ctx->logfile != NULL) {
-      fprintf(global_ctx->logfile, "[INTERRUPT] Scan interrupted by user\n");
-      fprintf(global_ctx->logfile, "[INTERRUPT] Keys scanned: %llu\n", 
-              (unsigned long long)atomic_load(&global_ctx->k_checked));
-      fclose(global_ctx->logfile);
-      global_ctx->logfile = NULL;
-    }
-  }
-  
   exit(sig);
 }
 
 void tty_cb(void *ctx_raw, const char ch) {
   ctx_t *ctx = (ctx_t *)ctx_raw;
 
-  if (ch == 'p' && !atomic_load(&ctx->paused)) {
-    pthread_mutex_lock(&ctx->lock);
+  if (ch == 'p' && !ctx->paused) {
     ctx->ts_paused_at = tsnow();
-    atomic_store(&ctx->paused, true);
-    pthread_mutex_unlock(&ctx->lock);
+    ctx->paused = true;
     ctx_print_status(ctx);
   }
 
-  if (ch == 'r' && atomic_load(&ctx->paused)) {
-    pthread_mutex_lock(&ctx->lock);
+  if (ch == 'r' && ctx->paused) {
     ctx->paused_time += tsnow() - ctx->ts_paused_at;
-    atomic_store(&ctx->paused, false);
-    pthread_cond_broadcast(&ctx->pause_cond);
-    pthread_mutex_unlock(&ctx->lock);
+    ctx->paused = false;
     ctx_print_status(ctx);
   }
 }
 
 int main(int argc, const char **argv) {
-  setlocale(LC_NUMERIC, "");
+  // https://stackoverflow.com/a/11695246
+  setlocale(LC_NUMERIC, ""); // for comma separated numbers
   args_t args = {argc, argv};
 
-  ctx_t ctx;
-  if (!init(&ctx, &args)) {
-    ctx_cleanup(&ctx);
-    return 1;
-  }
+  ctx_t ctx = {0};
+  init(&ctx, &args);
 
-  global_ctx = &ctx;
-  
-  signal(SIGINT, handle_sigint);
-  tty_init(tty_cb, &ctx);
+  signal(SIGINT, handle_sigint); // Keep last progress line on Ctrl-C
+  tty_init(tty_cb, &ctx);        // override tty to handle pause/resume
 
-  bool success = false;
-  if (ctx.cmd == CMD_ADD) success = cmd_add(&ctx);
-  if (ctx.cmd == CMD_MUL) success = cmd_mul(&ctx);
-  if (ctx.cmd == CMD_RND) success = cmd_rnd(&ctx);
-  if (ctx.cmd == CMD_SCAN) success = cmd_scan(&ctx);
+  if (ctx.cmd == CMD_ADD) cmd_add(&ctx);
+  if (ctx.cmd == CMD_MUL) cmd_mul(&ctx);
+  if (ctx.cmd == CMD_RND) cmd_rnd(&ctx);
 
-  ctx_cleanup(&ctx);
-  return success ? 0 : 1;
+  return 0;
 }
