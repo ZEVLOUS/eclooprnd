@@ -27,9 +27,9 @@ typedef struct ctx_t {
   pthread_mutex_t lock;
   size_t threads_count;
   pthread_t *threads;
-  int tid;                     // thread index (0 = UI thread, others silent)
-  bool pure_random_view;       // KeyHunt-style view mode for -d 0:0
-  char sample_key[67];         // buffer for live random key (0x + 64 hex chars)
+  int tid;
+  bool pure_random_view;
+  char sample_key[67];
   size_t k_checked;
   size_t k_found;
   bool check_addr33;
@@ -40,39 +40,34 @@ typedef struct ctx_t {
   bool quiet;
   bool use_color;
 
-  bool finished;       // true if the program is exiting
-  bool paused;         // true if the program is paused
-  size_t ts_started;   // timestamp of start
-  size_t ts_updated;   // timestamp of last update
-  size_t ts_printed;   // timestamp of last print
-  size_t ts_paused_at; // timestamp when paused
-  size_t paused_time;  // time spent in paused state
+  bool finished;
+  bool paused;
+  size_t ts_started;
+  size_t ts_updated;
+  size_t ts_printed;
+  size_t ts_paused_at;
+  size_t paused_time;
 
-  // filter file (bloom filter or hashes to search)
   h160_t *to_find_hashes;
   size_t to_find_count;
   blf_t blf;
 
-  // cmd add
-  fe range_s;  // search range start
-  fe range_e;  // search range end
-  fe stride_k; // precomputed stride key (step for G-points, 2^offset)
-  pe stride_p; // precomputed stride point (G * pk)
+  fe range_s;
+  fe range_e;
+  fe stride_k;
+  pe stride_p;
   pe gpoints[GROUP_INV_SIZE];
   size_t job_size;
 
-  // cmd mul
   queue_t queue;
   bool raw_text;
 
-  // cmd rnd
   bool has_seed;
-  u32 ord_offs; // offset (order) of range to search
-  u32 ord_size; // size (span) in range to search
+  u32 ord_offs;
+  u32 ord_size;
 
-  // cmd scan (custom scanner)
   bool stop_on_found;
-  char matrix_keys[10][65]; // Matrix-style scrolling keys display
+  char matrix_keys[10][65];
   int matrix_index;
   size_t scan_total_range;
   char target_address[64];
@@ -122,7 +117,6 @@ void load_filter(ctx_t *ctx, const char *filepath) {
   fclose(file);
   qsort(hashes, size, hlen, compare_160);
 
-  // remove duplicates
   size_t unique_count = 0;
   for (size_t i = 1; i < size; ++i) {
     if (memcmp(&hashes[unique_count * 5], &hashes[i * 5], hlen) != 0) {
@@ -134,27 +128,23 @@ void load_filter(ctx_t *ctx, const char *filepath) {
   ctx->to_find_hashes = (h160_t *)hashes;
   ctx->to_find_count = unique_count + 1;
 
-  // generate in-memory bloom filter
   ctx->blf.size = ctx->to_find_count * 2;
   ctx->blf.bits = malloc(ctx->blf.size * sizeof(u64));
   for (size_t i = 0; i < ctx->to_find_count; ++i) blf_add(&ctx->blf, hashes + i * 5);
 }
 
-// note: this function is not thread-safe; use mutex lock before calling
 void ctx_print_unlocked(ctx_t *ctx) {
-  // Only thread 0 prints in pure random mode
   if (ctx->pure_random_view && ctx->tid != 0) return;
   
   int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
   double dt = MAX(1, effective_time) / 1000.0;
   double speed = ctx->k_checked / dt / 1000000;
   
-  // KeyHunt-style Pure Random View - Clean minimal output
   if (ctx->pure_random_view && !ctx->quiet) {
     static const char spin[4] = {'|', '/', '-', '\\'};
     static int si = 0;
     
-    fprintf(stderr, "\033[H\033[J"); // Clear terminal
+    fprintf(stderr, "\033[H\033[J");
     fprintf(stderr, "SCANNING KEY: %s %c\n", ctx->sample_key, spin[si]);
     fprintf(stderr, "SPEED: %.2f MKeys/s\n", speed);
     fprintf(stderr, "TOTAL SCANNED: %zu\n", ctx->k_checked);
@@ -168,7 +158,6 @@ void ctx_print_unlocked(ctx_t *ctx) {
     return;
   }
   
-  // Default view for other modes
   if (!ctx->quiet) {
     char key_hex[17];
     snprintf(key_hex, sizeof(key_hex), "%016llx", ctx->range_s[3]);
@@ -196,14 +185,12 @@ void ctx_update(ctx_t *ctx, size_t k_checked) {
 
   pthread_mutex_lock(&ctx->lock);
   
-  // Update sample key for KeyHunt-style view (every update)
   if (ctx->pure_random_view) {
     snprintf(ctx->sample_key, sizeof(ctx->sample_key), 
              "%016llx%016llx%016llx%016llx", 
              ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
   }
   
-  // Update display every 20ms for KeyHunt view (smooth), 50ms for others
   bool need_print = ctx->pure_random_view 
     ? (ts - ctx->ts_printed) >= 20 
     : (ts - ctx->ts_printed) >= 50;
@@ -232,13 +219,11 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
 
   if (!ctx->quiet) {
     if (ctx->pure_random_view) {
-      // KeyHunt-style found key display - Clean text only
       fprintf(stderr, "\n\n*** KEY FOUND! ***\n");
       fprintf(stderr, "0x%016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
       fprintf(stderr, "\n");
       fflush(stderr);
     } else {
-      // Original display
       printf("\n*** KEY FOUND! ***\n");
       printf("0x%016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
       printf("\n");
@@ -247,8 +232,8 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
   }
 
   if (ctx->outfile != NULL) {
-    fprintf(ctx->outfile, "%s\t%08x%08x%08x%08x%08x\t%016llx%016llx%016llx%016llx\n", //
-            label, hash[0], hash[1], hash[2], hash[3], hash[4],                       //
+    fprintf(ctx->outfile, "%s\t%08x%08x%08x%08x%08x\t%016llx%016llx%016llx%016llx\n",
+            label, hash[0], hash[1], hash[2], hash[3], hash[4],
             pk[3], pk[2], pk[1], pk[0]);
     fflush(ctx->outfile);
   }
@@ -259,27 +244,23 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
 }
 
 bool ctx_check_hash(ctx_t *ctx, const h160_t h) {
-  // bloom filter only mode
   if (ctx->to_find_hashes == NULL) {
     return blf_has(&ctx->blf, h);
   }
 
-  // check by hashes list
-  if (!blf_has(&ctx->blf, h)) return false; // fast check with bloom filter
+  if (!blf_has(&ctx->blf, h)) return false;
 
-  // if bloom filter check passed, do full check
   h160_t *rs = bsearch(h, ctx->to_find_hashes, ctx->to_find_count, sizeof(h160_t), compare_160);
   return rs != NULL;
 }
 
 void ctx_precompute_gpoints(ctx_t *ctx) {
-  // precalc addition step with stride (2^offset)
   fe_set64(ctx->stride_k, 1);
   fe_shiftl(ctx->stride_k, ctx->ord_offs);
 
-  fe t; // precalc stride point
+  fe t;
   fe_modn_add_stride(t, FE_ZERO, ctx->stride_k, GROUP_INV_SIZE);
-  ec_jacobi_mulrdc(&ctx->stride_p, &G1, t); // G * (GROUP_INV_SIZE * gs)
+  ec_jacobi_mulrdc(&ctx->stride_p, &G1, t);
 
   pe g1, g2;
   ec_jacobi_mulrdc(&g1, &G1, ctx->stride_k);
@@ -287,17 +268,15 @@ void ctx_precompute_gpoints(ctx_t *ctx) {
 
   size_t hsize = GROUP_INV_SIZE / 2;
 
-  // K+1, K+2, .., K+N/2-1
   pe_clone(ctx->gpoints + 0, &g1);
   pe_clone(ctx->gpoints + 1, &g2);
   for (size_t i = 2; i < hsize; ++i) {
     ec_jacobi_addrdc(ctx->gpoints + i, ctx->gpoints + i - 1, &g1);
   }
 
-  // K-1, K-2, .., K-N/2
   for (size_t i = 0; i < hsize; ++i) {
     pe_clone(&ctx->gpoints[hsize + i], &ctx->gpoints[i]);
-    fe_modp_neg(ctx->gpoints[hsize + i].y, ctx->gpoints[i].y); // y = -y
+    fe_modp_neg(ctx->gpoints[hsize + i].y, ctx->gpoints[i].y);
   }
 }
 
@@ -355,10 +334,6 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
 
   if (!ctx->use_endo) return;
 
-  // https://bitcointalk.org/index.php?topic=5527935.msg65000919#msg65000919
-  // PubKeys  = (x,y) (x,-y) (x*beta,y) (x*beta,-y) (x*beta^2,y) (x*beta^2,-y)
-  // PrivKeys = (pk) (!pk) (pk*alpha) !(pk*alpha) (pk*alpha^2) !(pk*alpha^2)
-
   size_t esize = HASH_BATCH_SIZE * 5;
   pe endos[esize];
   for (size_t i = 0; i < esize; ++i) fe_set64(endos[i].z, 1);
@@ -367,19 +342,19 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
   for (size_t k = 0; k < GROUP_INV_SIZE; ++k) {
     size_t idx = (k * 5) % esize;
 
-    fe_clone(endos[idx + 0].x, points[k].x); // (x, -y)
+    fe_clone(endos[idx + 0].x, points[k].x);
     fe_modp_neg(endos[idx + 0].y, points[k].y);
 
-    fe_modp_mul(endos[idx + 1].x, points[k].x, B1); // (x * beta, y)
+    fe_modp_mul(endos[idx + 1].x, points[k].x, B1);
     fe_clone(endos[idx + 1].y, points[k].y);
 
-    fe_clone(endos[idx + 2].x, endos[idx + 1].x); // (x * beta, -y)
+    fe_clone(endos[idx + 2].x, endos[idx + 1].x);
     fe_clone(endos[idx + 2].y, endos[idx + 0].y);
 
-    fe_modp_mul(endos[idx + 3].x, points[k].x, B2); // (x * beta^2, y)
+    fe_modp_mul(endos[idx + 3].x, points[k].x, B2);
     fe_clone(endos[idx + 3].y, points[k].y);
 
-    fe_clone(endos[idx + 4].x, endos[idx + 3].x); // (x * beta^2, -y)
+    fe_clone(endos[idx + 4].x, endos[idx + 3].x);
     fe_clone(endos[idx + 4].y, endos[idx + 0].y);
 
     bool is_full = (idx + 5) % esize == 0 || k == GROUP_INV_SIZE - 1;
@@ -390,8 +365,6 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
       if (ctx->check_addr65) addr65_batch(hs65, endos + i, HASH_BATCH_SIZE);
 
       for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
-        // if (ci >= (GROUP_INV_SIZE * 5)) break;
-        // printf(">> %6zu | %6zu ~ %zu\n", ci, ci / 5, (ci % 5) + 1);
         if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, ci / 5, (ci % 5) + 1);
         if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, ci / 5, (ci % 5) + 1);
         ci += 1;
@@ -405,45 +378,38 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
 void batch_add(ctx_t *ctx, const fe pk, const size_t iterations) {
   size_t hsize = GROUP_INV_SIZE / 2;
 
-  pe bp[GROUP_INV_SIZE]; // calculated ec points
-  fe dx[hsize];          // delta x for group inversion
-  pe GStart;             // iteration points
-  fe ck, rx, ry;         // current start point; tmp for x3, y3
-  fe ss, dd;             // temp variables
+  pe bp[GROUP_INV_SIZE];
+  fe dx[hsize];
+  pe GStart;
+  fe ck, rx, ry;
+  fe ss, dd;
 
-  // set start point to center of the group
   fe_modn_add_stride(ss, pk, ctx->stride_k, hsize);
-  ec_jacobi_mulrdc(&GStart, &G1, ss); // G * (pk + hsize * gs)
+  ec_jacobi_mulrdc(&GStart, &G1, ss);
 
-  // group addition with single inversion (with stride support)
-  // structure: K-N/2 .. K-2 K-1 [K] K+1 K+2 .. K+N/2-1 (last K dropped to have odd size)
-  // points in `bp` already order by `pk` increment
-  fe_clone(ck, pk); // start pk for current iteration
+  fe_clone(ck, pk);
 
   size_t counter = 0;
   while (counter < iterations) {
     for (size_t i = 0; i < hsize; ++i) fe_modp_sub(dx[i], ctx->gpoints[i].x, GStart.x);
     fe_modp_grpinv(dx, hsize);
 
-    pe_clone(&bp[hsize + 0], &GStart); // set K value
+    pe_clone(&bp[hsize + 0], &GStart);
 
     for (size_t D = 0; D < 2; ++D) {
       bool positive = D == 0;
-      size_t g_idx = positive ? 0 : hsize; // plus points in first half, minus in second half
-      size_t g_max = positive ? hsize - 1 : hsize; // skip K+N/2, since we don't need it
+      size_t g_idx = positive ? 0 : hsize;
+      size_t g_max = positive ? hsize - 1 : hsize;
       for (size_t i = 0; i < g_max; ++i) {
-        fe_modp_sub(ss, ctx->gpoints[g_idx + i].y, GStart.y); // y2 - y1
-        fe_modp_mul(ss, ss, dx[i]);                           // λ = (y2 - y1) / (x2 - x1)
-        fe_modp_sqr(rx, ss);                                  // λ²
-        fe_modp_sub(rx, rx, GStart.x);                        // λ² - x1
-        fe_modp_sub(rx, rx, ctx->gpoints[g_idx + i].x);       // rx = λ² - x1 - x2
-        fe_modp_sub(dd, GStart.x, rx);                        // x1 - rx
-        fe_modp_mul(dd, ss, dd);                              // λ * (x1 - rx)
-        fe_modp_sub(ry, dd, GStart.y);                        // ry = λ * (x1 - rx) - y1
+        fe_modp_sub(ss, ctx->gpoints[g_idx + i].y, GStart.y);
+        fe_modp_mul(ss, ss, dx[i]);
+        fe_modp_sqr(rx, ss);
+        fe_modp_sub(rx, rx, GStart.x);
+        fe_modp_sub(rx, rx, ctx->gpoints[g_idx + i].x);
+        fe_modp_sub(dd, GStart.x, rx);
+        fe_modp_mul(dd, ss, dd);
+        fe_modp_sub(ry, dd, GStart.y);
 
-        // ordered by pk:
-        // [0]: K-N/2, [1]: K-N/2+1, .., [N/2-1]: K-1 // all minus points
-        // [N/2]: K, [N/2+1]: K+1, .., [N-1]: K+N/2-1 // K, plus points without last element
         size_t idx = positive ? hsize + i + 1 : hsize - 1 - i;
         fe_clone(bp[idx].x, rx);
         fe_clone(bp[idx].y, ry);
@@ -452,8 +418,8 @@ void batch_add(ctx_t *ctx, const fe pk, const size_t iterations) {
     }
 
     check_found_add(ctx, ck, bp);
-    fe_modn_add_stride(ck, ck, ctx->stride_k, GROUP_INV_SIZE); // move pk to next group START
-    ec_jacobi_addrdc(&GStart, &GStart, &ctx->stride_p);        // move GStart to next group CENTER
+    fe_modn_add_stride(ck, ck, ctx->stride_k, GROUP_INV_SIZE);
+    ec_jacobi_addrdc(&GStart, &GStart, &ctx->stride_p);
     counter += GROUP_INV_SIZE;
   }
 }
@@ -461,11 +427,9 @@ void batch_add(ctx_t *ctx, const fe pk, const size_t iterations) {
 void *cmd_add_worker(void *arg) {
   ctx_t *ctx = (ctx_t *)arg;
 
-  fe initial_r; // keep initial range start to check overflow
+  fe initial_r;
   fe_clone(initial_r, ctx->range_s);
 
-  // job_size multiply by 2^offset (iterate over desired digit order)
-  // for example: 3013 3023 .. 30X3 .. 3093 3103 3113
   fe inc = {0};
   fe_set64(inc, ctx->job_size);
   fe_modn_mul(inc, inc, ctx->stride_k);
@@ -496,7 +460,7 @@ void cmd_add(ctx_t *ctx) {
   fe range_size;
   fe_modn_sub(range_size, ctx->range_e, ctx->range_s);
   ctx->job_size = fe_cmp64(range_size, MAX_JOB_SIZE) < 0 ? range_size[0] : MAX_JOB_SIZE;
-  ctx->ts_started = tsnow(); // actual start time
+  ctx->ts_started = tsnow();
 
   for (size_t i = 0; i < ctx->threads_count; ++i) {
     pthread_create(&ctx->threads[i], NULL, cmd_add_worker, ctx);
@@ -522,12 +486,10 @@ void check_found_mul(ctx_t *ctx, const fe *pk, const pe *cp, size_t cnt) {
 
     for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
       if (ctx->check_addr33 && ctx_check_hash(ctx, hs33[j])) {
-        // pk_verify_hash(pk[i + j], hs33[j], true, 0);
         ctx_write_found(ctx, "addr33", hs33[j], pk[i + j]);
       }
 
       if (ctx->check_addr65 && ctx_check_hash(ctx, hs65[j])) {
-        // pk_verify_hash(pk[i + j], hs65[j], false, 0);
         ctx_write_found(ctx, "addr65", hs65[j], pk[i + j]);
       }
     }
@@ -542,8 +504,7 @@ typedef struct cmd_mul_job_t {
 void *cmd_mul_worker(void *arg) {
   ctx_t *ctx = (ctx_t *)arg;
 
-  // sha256 routine
-  u8 msg[(MAX_LINE_SIZE + 63 + 9) / 64 * 64] = {0}; // 9 = 1 byte 0x80 + 8 byte bitlen
+  u8 msg[(MAX_LINE_SIZE + 63 + 9) / 64 * 64] = {0};
   u32 res[8] = {0};
 
   fe pk[GROUP_INV_SIZE];
@@ -555,7 +516,6 @@ void *cmd_mul_worker(void *arg) {
     job = queue_get(&ctx->queue);
     if (job == NULL) break;
 
-    // parse private keys from hex string
     if (!ctx->raw_text) {
       for (size_t i = 0; i < job->count; ++i) fe_modn_from_hex(pk[i], job->lines[i]);
     } else {
@@ -563,18 +523,12 @@ void *cmd_mul_worker(void *arg) {
         size_t len = strlen(job->lines[i]);
         size_t msg_size = (len + 63 + 9) / 64 * 64;
 
-        // calculate sha256 hash
         size_t bitlen = len * 8;
         memcpy(msg, job->lines[i], len);
         memset(msg + len, 0, msg_size - len);
         msg[len] = 0x80;
         for (int j = 0; j < 8; j++) msg[msg_size - 1 - j] = bitlen >> (j * 8);
         sha256_final(res, (u8 *)msg, msg_size);
-
-        // debug log (do with `-t 1`)
-        // printf("\n%zu %s\n", len, job->lines[i]);
-        // for (int i = 0; i < msg_size; i++) printf("%02x%s", msg[i], i % 16 == 15 ? "\n" : " ");
-        // for (int i = 0; i < 8; i++) printf("%08x%s", res[i], i % 8 == 7 ? "\n" : "");
 
         pk[i][0] = (u64)res[6] << 32 | res[7];
         pk[i][1] = (u64)res[4] << 32 | res[5];
@@ -583,7 +537,6 @@ void *cmd_mul_worker(void *arg) {
       }
     }
 
-    // compute public keys in batch
     for (size_t i = 0; i < job->count; ++i) ec_gtable_mul(&cp[i], pk[i]);
     ec_jacobi_grprdc(cp, job->count);
 
@@ -634,22 +587,18 @@ void cmd_mul(ctx_t *ctx) {
 // MARK: CMD_RND
 
 void gen_random_range(ctx_t *ctx, const fe a, const fe b) {
-  // Pure random mode: generate small chunk around random key for thread distribution
   if (ctx->ord_size == 0) {
     fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
     fe_clone(ctx->range_e, ctx->range_s);
     
-    // Create a small range for thread distribution (threads_count * job_size)
     fe chunk_size;
     fe_set64(chunk_size, ctx->threads_count * ctx->job_size);
     fe_modn_add(ctx->range_e, ctx->range_s, chunk_size);
     
-    // Keep within bounds
     if (fe_cmp(ctx->range_e, b) > 0) fe_clone(ctx->range_e, b);
     return;
   }
 
-  // Chunked random mode: generate random base with dynamic bits
   fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
   fe_clone(ctx->range_e, ctx->range_s);
   for (u32 i = ctx->ord_offs; i < (ctx->ord_offs + ctx->ord_size); ++i) {
@@ -657,7 +606,6 @@ void gen_random_range(ctx_t *ctx, const fe a, const fe b) {
     ctx->range_e[i / 64] |= 1ULL << (i % 64);
   }
 
-  // put in bounds
   if (fe_cmp(ctx->range_s, a) <= 0) fe_clone(ctx->range_s, a);
   if (fe_cmp(ctx->range_e, b) >= 0) fe_clone(ctx->range_e, b);
 }
@@ -690,11 +638,10 @@ void print_range_mask(fe range_s, u32 bits_size, u32 offset, bool use_color) {
 
 void cmd_rnd(ctx_t *ctx) {
   ctx->ord_offs = MIN(ctx->ord_offs, 255 - ctx->ord_size);
-  // Silent mode - no header output
   
   ctx_precompute_gpoints(ctx);
   ctx->job_size = MAX_JOB_SIZE;
-  ctx->ts_started = tsnow(); // actual start time
+  ctx->ts_started = tsnow();
 
   fe range_s, range_e;
   fe_clone(range_s, ctx->range_s);
@@ -702,10 +649,8 @@ void cmd_rnd(ctx_t *ctx) {
 
   while (true) {
     gen_random_range(ctx, range_s, range_e);
-    // Silent mode - no range printing
     ctx_print_status(ctx);
 
-    // if full range is used, skip break after first iteration
     bool is_full = fe_cmp(ctx->range_s, range_s) == 0 && fe_cmp(ctx->range_e, range_e) == 0;
 
     for (size_t i = 0; i < ctx->threads_count; ++i) {
@@ -715,8 +660,6 @@ void cmd_rnd(ctx_t *ctx) {
     for (size_t i = 0; i < ctx->threads_count; ++i) {
       pthread_join(ctx->threads[i], NULL);
     }
-
-    // Silent mode - no iteration stats
     
     if (is_full) break;
   }
@@ -724,7 +667,7 @@ void cmd_rnd(ctx_t *ctx) {
   ctx_finish(ctx);
 }
 
-// MARK: CMD_SCAN (KeyHunt-Style Scanner)
+// MARK: CMD_SCAN (Matrix Scanner with Clean Exit)
 
 void draw_keyhunt_progress_bar(double progress, int width) {
   int filled = (int)(progress * width);
@@ -747,15 +690,12 @@ void draw_matrix_scanner(ctx_t *ctx) {
     if (progress > 1.0) progress = 1.0;
   }
   
-  // Clear screen
   printf("\033[2J\033[H");
   
-  // Range (minimal, one line)
   printf("%016llx%016llx%016llx%016llx -> %016llx%016llx%016llx%016llx\n\n", 
          ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0],
          ctx->range_e[3], ctx->range_e[2], ctx->range_e[1], ctx->range_e[0]);
   
-  // Matrix scrolling keys - fade effect
   for (int i = 0; i < 10; i++) {
     if (strlen(ctx->matrix_keys[i]) > 0) {
       int color = 46 - (i * 2);
@@ -767,7 +707,6 @@ void draw_matrix_scanner(ctx_t *ctx) {
   
   printf("\n");
   
-  // Stats (minimal)
   printf("Keys/sec: %.2f MKey/s\n", speed);
   printf("Total: %'llu keys\n", (unsigned long long)ctx->k_checked);
   printf("Progress: ");
@@ -775,7 +714,9 @@ void draw_matrix_scanner(ctx_t *ctx) {
   printf("\n");
   printf("Threads: %zu  |  Found: %zu\n", ctx->threads_count, ctx->k_found);
   
-  if (ctx->finished) {
+  if (ctx->k_found > 0) {
+    printf("\n\033[1;32m*** KEY FOUND! Stopping scan...\033[0m\n");
+  } else if (ctx->finished) {
     printf("\nScan Complete!\n");
   }
   
@@ -783,12 +724,10 @@ void draw_matrix_scanner(ctx_t *ctx) {
 }
 
 void update_matrix_display(ctx_t *ctx, const fe pk) {
-  // Scroll all keys down
   for (int i = 9; i > 0; i--) {
     strcpy(ctx->matrix_keys[i], ctx->matrix_keys[i-1]);
   }
   
-  // Add new key at top
   snprintf(ctx->matrix_keys[0], 65, "%016llx%016llx%016llx%016llx", 
            pk[3], pk[2], pk[1], pk[0]);
 }
@@ -801,18 +740,14 @@ void ctx_scan_update(ctx_t *ctx, size_t k_checked, const fe current_pk) {
   ctx->k_checked += k_checked;
   ctx->ts_updated = ts;
   
-  // Update matrix keys INSTANTLY - no throttling
-  update_matrix_display(ctx, current_pk);
-  
-  // Refresh display every 20ms for super smooth 50 FPS
-  if ((ts - ctx->ts_printed) >= 20) {
+  if ((ts - ctx->ts_printed) >= 100) {
+    update_matrix_display(ctx, current_pk);
     ctx->ts_printed = ts;
     draw_matrix_scanner(ctx);
   }
   
   pthread_mutex_unlock(&ctx->lock);
   
-  // Stop if key was found
   if (ctx->stop_on_found && ctx->k_found > 0) {
     pthread_mutex_lock(&ctx->lock);
     ctx->finished = true;
@@ -833,7 +768,6 @@ void check_found_scan(ctx_t *ctx, fe const start_pk, const pe *points) {
       if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, i + j, 0);
       if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, i + j, 0);
       
-      // Stop immediately if key found
       if (ctx->stop_on_found && ctx->k_found > 0) {
         return;
       }
@@ -877,7 +811,6 @@ void check_found_scan(ctx_t *ctx, fe const start_pk, const pe *points) {
         if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, ci / 5, (ci % 5) + 1);
         ci += 1;
         
-        // Stop immediately if key found
         if (ctx->stop_on_found && ctx->k_found > 0) {
           return;
         }
@@ -904,6 +837,10 @@ void batch_scan(ctx_t *ctx, const fe pk, const size_t iterations) {
 
   size_t counter = 0;
   while (counter < iterations && !ctx->finished) {
+    if (ctx->finished || (ctx->stop_on_found && ctx->k_found > 0)) {
+      break;
+    }
+    
     for (size_t i = 0; i < hsize; ++i) fe_modp_sub(dx[i], ctx->gpoints[i].x, GStart.x);
     fe_modp_grpinv(dx, hsize);
 
@@ -932,13 +869,12 @@ void batch_scan(ctx_t *ctx, const fe pk, const size_t iterations) {
 
     check_found_scan(ctx, ck, bp);
     
-    // Update display EVERY BATCH - INSTANT, NO LAG!
-    ctx_scan_update(ctx, GROUP_INV_SIZE, ck);
-    
-    // Stop if key found
     if (ctx->stop_on_found && ctx->k_found > 0) {
+      ctx_scan_update(ctx, GROUP_INV_SIZE, ck);
       break;
     }
+    
+    ctx_scan_update(ctx, GROUP_INV_SIZE, ck);
     
     fe_modn_add_stride(ck, ck, ctx->stride_k, GROUP_INV_SIZE);
     ec_jacobi_addrdc(&GStart, &GStart, &ctx->stride_p);
@@ -971,7 +907,6 @@ void *cmd_scan_worker(void *arg) {
 
     batch_scan(ctx, pk, ctx->job_size);
     
-    // Stop if key found
     if (ctx->stop_on_found && ctx->k_found > 0) {
       break;
     }
@@ -981,17 +916,21 @@ void *cmd_scan_worker(void *arg) {
 }
 
 void cmd_scan(ctx_t *ctx) {
-  ctx->stop_on_found = true; // Always stop when key is found in scan mode
+  ctx->stop_on_found = true;
   
-  // Initialize matrix display
   for (int i = 0; i < 10; i++) {
     ctx->matrix_keys[i][0] = '\0';
   }
   
-  // Calculate total range for progress bar
   fe range_size;
   fe_modn_sub(range_size, ctx->range_e, ctx->range_s);
-  ctx->scan_total_range = range_size[0]; // Approximate for progress
+  ctx->scan_total_range = range_size[0];
+  
+  if (!ctx->quiet) {
+    fprintf(stderr, "[SCAN] Starting scan\n");
+    fprintf(stderr, "[SCAN] Range: %016llx...%016llx\n", ctx->range_s[3], ctx->range_e[3]);
+    fprintf(stderr, "[SCAN] Threads: %zu\n", ctx->threads_count);
+  }
   
   ctx_precompute_gpoints(ctx);
 
@@ -1000,7 +939,6 @@ void cmd_scan(ctx_t *ctx) {
   ctx->ts_started = tsnow();
   ctx->ts_printed = ctx->ts_started;
 
-  // Initial display with start key
   draw_matrix_scanner(ctx);
 
   for (size_t i = 0; i < ctx->threads_count; ++i) {
@@ -1013,9 +951,38 @@ void cmd_scan(ctx_t *ctx) {
 
   pthread_mutex_lock(&ctx->lock);
   ctx->finished = true;
+  
   draw_matrix_scanner(ctx);
+  
+  int64_t effective_time = (int64_t)(tsnow() - ctx->ts_started) - (int64_t)ctx->paused_time;
+  double elapsed_sec = MAX(1, effective_time) / 1000.0;
+  double avg_kps = ctx->k_checked / elapsed_sec / 1000000;
+  
+  if (ctx->k_found > 0) {
+    printf("\n\033[1;32m================================\033[0m\n");
+    printf("\033[1;32m*** SUCCESS ***\033[0m\n");
+    printf("\033[1;32m================================\033[0m\n");
+    printf("Found: %zu key(s)\n", ctx->k_found);
+    if (ctx->outfile != NULL) {
+      printf("Result: Persisted to output file\n");
+    }
+    printf("Elapsed: %.2f seconds\n", elapsed_sec);
+    printf("Total Checked: %'llu keys\n", (unsigned long long)ctx->k_checked);
+    printf("Average Speed: %.2f MKey/s\n", avg_kps);
+    printf("\033[1;32mShutting down now.\033[0m\n");
+  } else {
+    printf("\nScan complete. No keys found.\n");
+    printf("Elapsed: %.2f seconds\n", elapsed_sec);
+    printf("Total Checked: %'llu keys\n", (unsigned long long)ctx->k_checked);
+    printf("Average Speed: %.2f MKey/s\n", avg_kps);
+  }
+  
   if (ctx->outfile != NULL) fclose(ctx->outfile);
   pthread_mutex_unlock(&ctx->lock);
+  
+  if (!ctx->quiet) {
+    fprintf(stderr, "[SCAN] Graceful shutdown complete\n");
+  }
 }
 
 // MARK: args helpers
@@ -1037,9 +1004,6 @@ void arg_search_range(args_t *args, fe range_s, fe range_e) {
   *sep = 0;
   fe_modn_from_hex(range_s, raw);
   fe_modn_from_hex(range_e, sep + 1);
-
-  // if (fe_cmp64(range_s, GROUP_INV_SIZE) <= 0) fe_set64(range_s, GROUP_INV_SIZE + 1);
-  // if (fe_cmp(range_e, FE_P) > 0) fe_clone(range_e, FE_P);
 
   if (fe_cmp64(range_s, GROUP_INV_SIZE) <= 0) {
     fprintf(stderr, "invalid search range, start <= %#lx\n", GROUP_INV_SIZE);
@@ -1093,9 +1057,7 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
     exit(1);
   }
 
-  // Allow bits == 0 for pure random mode, otherwise enforce MIN_SIZE
   if (tmp_size == 0) {
-    // Pure random mode: -d 0:0
     ctx->ord_offs = 0;
     ctx->ord_size = 0;
     return;
@@ -1139,7 +1101,6 @@ void usage(const char *name) {
 }
 
 void init(ctx_t *ctx, args_t *args) {
-  // check other commands first
   if (args->argc > 1) {
     if (strcmp(args->argv[1], "blf-gen") == 0) return blf_gen(args);
     if (strcmp(args->argv[1], "blf-check") == 0) return blf_check(args);
@@ -1150,7 +1111,7 @@ void init(ctx_t *ctx, args_t *args) {
 
   ctx->use_color = isatty(fileno(stdout));
 
-  ctx->cmd = CMD_NIL; // default show help
+  ctx->cmd = CMD_NIL;
   if (args->argc > 1) {
     if (strcmp(args->argv[1], "add") == 0) ctx->cmd = CMD_ADD;
     if (strcmp(args->argv[1], "mul") == 0) ctx->cmd = CMD_MUL;
@@ -1191,11 +1152,11 @@ void init(ctx_t *ctx, args_t *args) {
   }
 
   if (!ctx->check_addr33 && !ctx->check_addr65) {
-    ctx->check_addr33 = true; // default to addr33
+    ctx->check_addr33 = true;
   }
 
   ctx->use_endo = args_bool(args, "-endo");
-  if (ctx->cmd == CMD_MUL) ctx->use_endo = false; // no endo for mul command
+  if (ctx->cmd == CMD_MUL) ctx->use_endo = false;
 
   pthread_mutex_init(&ctx->lock, NULL);
   int cpus = get_cpu_count();
@@ -1214,21 +1175,16 @@ void init(ctx_t *ctx, args_t *args) {
   load_offs_size(ctx, args);
   queue_init(&ctx->queue, ctx->threads_count * 3);
 
-  // Enable KeyHunt-style view for pure random mode (-d 0:0)
   ctx->pure_random_view = (ctx->ord_size == 0 && ctx->cmd == CMD_RND);
-  ctx->tid = 0; // Main thread is 0
+  ctx->tid = 0;
   
-  // Initialize sample_key
   snprintf(ctx->sample_key, sizeof(ctx->sample_key), 
            "0000000000000000000000000000000000000000000000000000000000000000");
-
-  // Silent mode - no initialization output
   
   if (ctx->cmd == CMD_MUL) {
     ctx->raw_text = args_bool(args, "-raw");
   }
   
-  // Initialize scan mode fields
   ctx->target_address[0] = '\0';
   ctx->stop_on_found = false;
   ctx->matrix_index = 0;
@@ -1259,15 +1215,14 @@ void tty_cb(void *ctx_raw, const char ch) {
 }
 
 int main(int argc, const char **argv) {
-  // https://stackoverflow.com/a/11695246
-  setlocale(LC_NUMERIC, ""); // for comma separated numbers
+  setlocale(LC_NUMERIC, "");
   args_t args = {argc, argv};
 
   ctx_t ctx = {0};
   init(&ctx, &args);
 
-  signal(SIGINT, handle_sigint); // Keep last progress line on Ctrl-C
-  tty_init(tty_cb, &ctx);        // override tty to handle pause/resume
+  signal(SIGINT, handle_sigint);
+  tty_init(tty_cb, &ctx);
 
   if (ctx.cmd == CMD_ADD) cmd_add(&ctx);
   if (ctx.cmd == CMD_MUL) cmd_mul(&ctx);
