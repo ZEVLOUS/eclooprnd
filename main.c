@@ -12,11 +12,11 @@
 #include <string.h>
 #include <assert.h>
 
-// Include header files instead of .c files to avoid multiple definitions
-#include "lib/addr.h"
-#include "lib/bench.h"
-#include "lib/ecc.h"
-#include "lib/utils.h"
+// Include the .c files directly to ensure all functions are available
+#include "lib/addr.c"
+#include "lib/bench.c"
+#include "lib/ecc.c"
+#include "lib/utils.c"
 
 #define VERSION "0.5.0"
 #define MAX_JOB_SIZE 1024 * 1024 * 2
@@ -31,7 +31,7 @@ enum Cmd { CMD_NIL, CMD_ADD, CMD_MUL, CMD_RND };
 // Global flag for immediate stop when key found
 static volatile bool global_key_found = false;
 
-// Function declarations - these are defined in the lib files
+// Function declarations for functions that are used but might not be properly declared
 void fe_rand(fe x, bool use_entropy);
 void fe_rand_range(fe x, const fe a, const fe b, bool use_entropy);
 size_t fe_bitlen(const fe x);
