@@ -76,6 +76,15 @@ typedef struct ctx_t {
   int matrix_index;
   size_t scan_total_range;
   char target_address[64];
+  
+  // Enhanced features
+  size_t last_k_checked;        // For instantaneous KPS calculation
+  size_t last_k_timestamp;      // Timestamp for last KPS measurement
+  fe current_scan_pos;          // Current position in range
+  bool enable_beep;             // Audio notification flag
+  FILE *logfile;                // Optional log file
+  char session_file[256];       // Session persistence file path
+  bool load_session;            // Load from saved session
 } ctx_t;
 
 void load_filter(ctx_t *ctx, const char *filepath) {
@@ -739,7 +748,22 @@ void draw_keyhunt_progress_bar(double progress, int width) {
 void draw_matrix_scanner(ctx_t *ctx) {
   int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
   double dt = MAX(1, effective_time) / 1000.0;
-  double speed = ctx->k_checked / dt / 1000000;
+  double avg_speed = ctx->k_checked / dt / 1000000;
+  
+  // Calculate instantaneous speed (last second)
+  double instant_speed = 0.0;
+  size_t ts = tsnow();
+  if (ctx->last_k_timestamp > 0 && (ts - ctx->last_k_timestamp) > 0) {
+    double time_diff = (ts - ctx->last_k_timestamp) / 1000.0;
+    instant_speed = (ctx->k_checked - ctx->last_k_checked) / time_diff / 1000000;
+  }
+  
+  // Calculate ETA
+  double eta_seconds = 0.0;
+  if (ctx->scan_total_range > 0 && avg_speed > 0) {
+    size_t remaining = ctx->scan_total_range - ctx->k_checked;
+    eta_seconds = remaining / (avg_speed * 1000000);
+  }
   
   double progress = 0.0;
   if (ctx->scan_total_range > 0) {
@@ -747,18 +771,54 @@ void draw_matrix_scanner(ctx_t *ctx) {
     if (progress > 1.0) progress = 1.0;
   }
   
+  // Color coding based on speed
+  const char *status_color = "\033[1;32m"; // Green (good)
+  const char *status_text = "OPTIMAL";
+  if (avg_speed < 0.05) {
+    status_color = "\033[1;31m"; // Red (slow)
+    status_text = "SLOW";
+  } else if (avg_speed < 0.1) {
+    status_color = "\033[1;33m"; // Yellow (moderate)
+    status_text = "MODERATE";
+  }
+  
   // Clear screen
   printf("\033[2J\033[H");
   
+  // Enhanced header with status
+  printf("%s╔═══════════════════════════════════════════════════════════════════╗\033[0m\n", status_color);
+  printf("%s║ STATUS: %-10s                                                 ║\033[0m\n", status_color, status_text);
+  printf("%s╚═══════════════════════════════════════════════════════════════════╝\033[0m\n\n", status_color);
+  
+  // Range position display
+  if (strlen(ctx->matrix_keys[0]) > 0) {
+    printf("RANGE: %016llx%016llx → \033[1;36m%s\033[0m → %016llx%016llx\n\n",
+           ctx->range_s[3], ctx->range_s[2],
+           ctx->matrix_keys[0] + 32, // Show last 32 chars (current position)
+           ctx->range_e[3], ctx->range_e[2]);
+  }
+  
   // Current scanning key (top display)
   if (strlen(ctx->matrix_keys[0]) > 0) {
-    printf("SCANNING KEY: %s\n", ctx->matrix_keys[0]);
+    printf("SCANNING KEY: \033[1;37m%s\033[0m\n", ctx->matrix_keys[0]);
   } else {
     printf("SCANNING KEY: initializing...\n");
   }
   
-  printf("SPEED: %.2f MKeys/s\n", speed);
-  printf("TOTAL SCANNED: %llu\n\n", (unsigned long long)ctx->k_checked);
+  // Enhanced statistics
+  printf("SPEED (AVG): \033[1;32m%.2f\033[0m MKeys/s  |  ", avg_speed);
+  printf("SPEED (NOW): \033[1;36m%.2f\033[0m MKeys/s\n", instant_speed);
+  printf("TOTAL SCANNED: \033[1;33m%'llu\033[0m keys\n", (unsigned long long)ctx->k_checked);
+  
+  // ETA display
+  if (eta_seconds > 0 && eta_seconds < 86400 * 365) { // Less than 1 year
+    int eta_hours = (int)(eta_seconds / 3600);
+    int eta_mins = (int)((eta_seconds - eta_hours * 3600) / 60);
+    int eta_secs = (int)(eta_seconds - eta_hours * 3600 - eta_mins * 60);
+    printf("ETA: \033[1;35m%02d:%02d:%02d\033[0m\n", eta_hours, eta_mins, eta_secs);
+  }
+  
+  printf("\n");
   
   // Matrix scrolling keys with fade
   for (int i = 0; i < 10; i++) {
@@ -776,6 +836,19 @@ void draw_matrix_scanner(ctx_t *ctx) {
   printf(" | Threads: %zu\n", ctx->threads_count);
   
   fflush(stdout);
+  
+  // Update last measurement for instantaneous speed
+  if ((ts - ctx->last_k_timestamp) >= 1000) { // Update every second
+    ctx->last_k_checked = ctx->k_checked;
+    ctx->last_k_timestamp = ts;
+  }
+  
+  // Optional logging
+  if (ctx->logfile != NULL) {
+    fprintf(ctx->logfile, "[%zu] Keys: %llu | Speed: %.2f MKeys/s | Progress: %.2f%%\n",
+            ts, (unsigned long long)ctx->k_checked, avg_speed, progress * 100);
+    fflush(ctx->logfile);
+  }
 }
 
 void update_matrix_display(ctx_t *ctx, const fe pk) {
@@ -789,6 +862,19 @@ void update_matrix_display(ctx_t *ctx, const fe pk) {
            pk[3], pk[2], pk[1], pk[0]);
 }
 
+void save_session(ctx_t *ctx) {
+  if (strlen(ctx->session_file) > 0) {
+    FILE *f = fopen(ctx->session_file, "w");
+    if (f) {
+      fprintf(f, "%016llx%016llx%016llx%016llx\n", 
+              ctx->current_scan_pos[3], ctx->current_scan_pos[2],
+              ctx->current_scan_pos[1], ctx->current_scan_pos[0]);
+      fprintf(f, "%llu\n", (unsigned long long)ctx->k_checked);
+      fclose(f);
+    }
+  }
+}
+
 void ctx_scan_update(ctx_t *ctx, size_t k_checked, const fe current_pk) {
   size_t ts = tsnow();
   
@@ -797,11 +883,17 @@ void ctx_scan_update(ctx_t *ctx, size_t k_checked, const fe current_pk) {
   ctx->k_checked += k_checked;
   ctx->ts_updated = ts;
   
+  // Store current position for session persistence
+  fe_clone(ctx->current_scan_pos, current_pk);
+  
   // Update matrix display at controlled rate (100ms = 10 FPS target)
   if ((ts - ctx->ts_printed) >= 100) {
     update_matrix_display(ctx, current_pk);
     ctx->ts_printed = ts;
     draw_matrix_scanner(ctx);
+    
+    // Save session periodically (every update)
+    save_session(ctx);
   }
   
   // ATOMIC: Set finished flag immediately if key found (still within mutex)
@@ -973,6 +1065,25 @@ void *cmd_scan_worker(void *arg) {
   return NULL;
 }
 
+void load_session(ctx_t *ctx) {
+  if (strlen(ctx->session_file) > 0 && ctx->load_session) {
+    FILE *f = fopen(ctx->session_file, "r");
+    if (f) {
+      char line[128];
+      if (fgets(line, sizeof(line), f)) {
+        fe_modn_from_hex(ctx->range_s, line);
+        fprintf(stderr, "[SESSION] Resumed from: %s", line);
+      }
+      if (fgets(line, sizeof(line), f)) {
+        ctx->k_checked = strtoull(line, NULL, 10);
+        fprintf(stderr, "[SESSION] Previous keys scanned: %llu\n", 
+                (unsigned long long)ctx->k_checked);
+      }
+      fclose(f);
+    }
+  }
+}
+
 void cmd_scan(ctx_t *ctx) {
   ctx->stop_on_found = true;
   
@@ -980,6 +1091,14 @@ void cmd_scan(ctx_t *ctx) {
   for (int i = 0; i < 10; i++) {
     ctx->matrix_keys[i][0] = '\0';
   }
+  
+  // Initialize enhanced features
+  ctx->last_k_checked = 0;
+  ctx->last_k_timestamp = tsnow();
+  fe_set64(ctx->current_scan_pos, 0);
+  
+  // Load session if requested
+  load_session(ctx);
   
   // Calculate total range
   fe range_size;
@@ -1022,32 +1141,57 @@ void cmd_scan(ctx_t *ctx) {
   printf("\033[2J\033[H");
   
   if (ctx->k_found > 0) {
+    // Audio notification (beep)
+    if (ctx->enable_beep) {
+      printf("\a\a\a"); // ASCII bell character (3 beeps)
+      fflush(stdout);
+    }
+    
     printf("\n");
-    printf("[ KEY FOUND ]\n");
+    printf("\033[1;32m╔════════════════════════════════════════════════════════════════╗\033[0m\n");
+    printf("\033[1;32m║                      [ KEY FOUND ]                             ║\033[0m\n");
+    printf("\033[1;32m╚════════════════════════════════════════════════════════════════╝\033[0m\n");
+    printf("\n");
     
     if (strlen(ctx->matrix_keys[0]) > 0) {
-      printf("0x%s\n", ctx->matrix_keys[0]);
+      printf("\033[1;33m0x%s\033[0m\n", ctx->matrix_keys[0]);
     }
     
     if (ctx->outfile != NULL) {
       fflush(ctx->outfile);
       fclose(ctx->outfile);
-      printf("Result saved to output file\n");
+      printf("\033[1;32m✓\033[0m Result saved to output file\n");
     }
     
-    printf("Time elapsed: %02d:%02d:%02d\n", elapsed_hours, elapsed_mins, elapsed_secs);
-    printf("Total scanned: %llu keys\n", (unsigned long long)ctx->k_checked);
-    printf("Average speed: %.2f MKeys/s\n", avg_kps);
-    printf("Exiting...\n");
+    printf("\033[1;36mTime elapsed:\033[0m %02d:%02d:%02d\n", elapsed_hours, elapsed_mins, elapsed_secs);
+    printf("\033[1;36mTotal scanned:\033[0m %'llu keys\n", (unsigned long long)ctx->k_checked);
+    printf("\033[1;36mAverage speed:\033[0m %.2f MKeys/s\n", avg_kps);
+    printf("\033[1;32mExiting...\033[0m\n");
     fflush(stdout);
+    
+    // Clean up session file on success
+    if (strlen(ctx->session_file) > 0) {
+      remove(ctx->session_file);
+    }
+    
+    // Close log file
+    if (ctx->logfile != NULL) {
+      fprintf(ctx->logfile, "[SUCCESS] Key found: 0x%s\n", ctx->matrix_keys[0]);
+      fprintf(ctx->logfile, "[SUCCESS] Total scanned: %llu keys\n", 
+              (unsigned long long)ctx->k_checked);
+      fclose(ctx->logfile);
+    }
+    
     exit(0);
   } else {
-    printf("\nScan complete. No keys found.\n");
+    printf("\n\033[1;33mScan complete. No keys found.\033[0m\n");
     printf("Time elapsed: %02d:%02d:%02d\n", elapsed_hours, elapsed_mins, elapsed_secs);
-    printf("Total scanned: %llu keys\n", (unsigned long long)ctx->k_checked);
+    printf("Total scanned: %'llu keys\n", (unsigned long long)ctx->k_checked);
     printf("Average speed: %.2f MKeys/s\n", avg_kps);
     fflush(stdout);
+    
     if (ctx->outfile != NULL) fclose(ctx->outfile);
+    if (ctx->logfile != NULL) fclose(ctx->logfile);
   }
 }
 // MARK: args helpers
@@ -1162,6 +1306,11 @@ void usage(const char *name) {
   printf("                    use -d 0:0 for pure random mode (no chunking)\n");
   printf("  -q              - quiet mode (no output to stdout; -o required)\n");
   printf("  -endo           - use endomorphism (default: false)\n");
+  printf("\nScan command enhanced options:\n");
+  printf("  --beep          - enable audio notification on key found\n");
+  printf("  --log <file>    - write detailed scan log to file\n");
+  printf("  --session <file>- save/resume scan position (use with Ctrl+C)\n");
+  printf("  --resume        - resume from last saved session\n");
   printf("\nOther commands:\n");
   printf("  blf-gen         - create bloom filter from list of hex-encoded hash160\n");
   printf("  blf-check       - check bloom filter for given hex-encoded hash160\n");
@@ -1265,12 +1414,60 @@ void init(ctx_t *ctx, args_t *args) {
   ctx->stop_on_found = false;
   ctx->matrix_index = 0;
   ctx->scan_total_range = 0;
+  
+  // Enhanced features initialization
+  ctx->enable_beep = args_bool(args, "--beep");
+  ctx->load_session = args_bool(args, "--resume");
+  ctx->logfile = NULL;
+  ctx->session_file[0] = '\0';
+  
+  // Log file (scan command only)
+  if (ctx->cmd == CMD_SCAN) {
+    char *logfile = arg_str(args, "--log");
+    if (logfile) {
+      ctx->logfile = fopen(logfile, "a");
+      if (ctx->logfile) {
+        fprintf(ctx->logfile, "\n[START] Scan started at timestamp %llu\n", (unsigned long long)tsnow());
+        fprintf(ctx->logfile, "[CONFIG] Threads: %zu\n", ctx->threads_count);
+        fprintf(ctx->logfile, "[CONFIG] Range: %016llx%016llx -> %016llx%016llx\n",
+                ctx->range_s[3], ctx->range_s[2], ctx->range_e[3], ctx->range_e[2]);
+        fflush(ctx->logfile);
+      }
+    }
+    
+    // Session file (scan command only)
+    char *sessionfile = arg_str(args, "--session");
+    if (sessionfile) {
+      strncpy(ctx->session_file, sessionfile, sizeof(ctx->session_file) - 1);
+    } else if (ctx->load_session) {
+      // Default session file if --resume is used without --session
+      snprintf(ctx->session_file, sizeof(ctx->session_file), ".eclooprnd_session.dat");
+    }
+  }
 }
+
+// Global context pointer for signal handler
+static ctx_t *global_ctx = NULL;
 
 void handle_sigint(int sig) {
   fflush(stderr);
   fflush(stdout);
   printf("\n");
+  
+  // Save session before exit
+  if (global_ctx != NULL && global_ctx->cmd == CMD_SCAN) {
+    save_session(global_ctx);
+    printf("\033[1;33m[SESSION] Progress saved to: %s\033[0m\n", global_ctx->session_file);
+    printf("\033[1;33m[SESSION] Resume with: --session %s --resume\033[0m\n", global_ctx->session_file);
+    
+    if (global_ctx->logfile != NULL) {
+      fprintf(global_ctx->logfile, "[INTERRUPT] Scan interrupted by user\n");
+      fprintf(global_ctx->logfile, "[INTERRUPT] Keys scanned: %llu\n", 
+              (unsigned long long)global_ctx->k_checked);
+      fclose(global_ctx->logfile);
+    }
+  }
+  
   exit(sig);
 }
 
@@ -1298,6 +1495,8 @@ int main(int argc, const char **argv) {
   ctx_t ctx = {0};
   init(&ctx, &args);
 
+  global_ctx = &ctx; // Set global context for signal handler
+  
   signal(SIGINT, handle_sigint); // Keep last progress line on Ctrl-C
   tty_init(tty_cb, &ctx);        // override tty to handle pause/resume
 
