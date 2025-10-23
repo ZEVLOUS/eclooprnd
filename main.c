@@ -736,7 +736,7 @@ void draw_keyhunt_progress_bar(double progress, int width) {
   printf("] %.2f%%", progress * 100);
 }
 
-void draw_keyhunt_scanner(ctx_t *ctx, const fe current_pk) {
+void draw_matrix_scanner(ctx_t *ctx) {
   int64_t effective_time = (int64_t)(ctx->ts_updated - ctx->ts_started) - (int64_t)ctx->paused_time;
   double dt = MAX(1, effective_time) / 1000.0;
   double speed = ctx->k_checked / dt / 1000000;
@@ -747,43 +747,61 @@ void draw_keyhunt_scanner(ctx_t *ctx, const fe current_pk) {
     if (progress > 1.0) progress = 1.0;
   }
   
-  // Clear screen
+  // Clear screen and move to top
   printf("\033[2J\033[H");
   
-  // Display range info
+  // Header
   printf("\033[1;36m╔════════════════════════════════════════════════════════════════════╗\n");
   printf("║              KeyHunt-Style Bitcoin Key Scanner                    ║\n");
   printf("╚════════════════════════════════════════════════════════════════════╝\033[0m\n\n");
   
-  printf("\033[1;33mRange:\033[0m\n");
-  printf("  Start: \033[0;32m%016llx%016llx%016llx%016llx\033[0m\n", 
-         ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
-  printf("  End:   \033[0;32m%016llx%016llx%016llx%016llx\033[0m\n\n", 
+  // Range info (compact)
+  printf("\033[1;33mRange:\033[0m \033[0;32m%016llx%016llx%016llx%016llx\033[0m → \033[0;32m%016llx%016llx%016llx%016llx\033[0m\n\n", 
+         ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0],
          ctx->range_e[3], ctx->range_e[2], ctx->range_e[1], ctx->range_e[0]);
   
-  // Live scanning key - THIS IS THE KEY FEATURE
-  printf("\033[1;32m► Scanning Key:\033[0m\n");
-  printf("  \033[1;37m%016llx%016llx%016llx%016llx\033[0m\n\n", 
-         current_pk[3], current_pk[2], current_pk[1], current_pk[0]);
+  // MATRIX SCROLLING KEYS - THE MAIN FEATURE
+  printf("\033[1;32m▼ SCANNING KEYS (Live Matrix View):\033[0m\n");
+  printf("\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
+  
+  // Display scrolling matrix keys with fade effect
+  for (int i = 0; i < 10; i++) {
+    if (strlen(ctx->matrix_keys[i]) > 0) {
+      // Fade from bright green (newest) to dim (oldest)
+      int color = 46 - (i * 2); // Bright green to dark green
+      printf("\033[38;5;%dm%s\033[0m\n", color, ctx->matrix_keys[i]);
+    } else {
+      printf("\n");
+    }
+  }
+  
+  printf("\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n");
   
   // Statistics
-  printf("\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
   printf("\033[1;33mStatistics:\033[0m\n");
   printf("  Keys/sec:       \033[1;32m%.2f MKey/s\033[0m\n", speed);
   printf("  Total Scanned:  \033[1;37m%'llu keys\033[0m\n", (unsigned long long)ctx->k_checked);
   printf("  Progress:       ");
   draw_keyhunt_progress_bar(progress, 40);
   printf("\n");
-  printf("  Threads:        \033[1;35m%zu\033[0m\n", ctx->threads_count);
-  printf("  Found Keys:     \033[1;31m%zu\033[0m\n", ctx->k_found);
+  printf("  Threads:        \033[1;35m%zu\033[0m  |  Found Keys: \033[1;31m%zu\033[0m\n", ctx->threads_count, ctx->k_found);
   
   if (ctx->finished) {
     printf("\n\033[1;32m✓ Scan Complete!\033[0m\n");
   }
   
-  printf("\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
-  
   fflush(stdout);
+}
+
+void update_matrix_display(ctx_t *ctx, const fe pk) {
+  // Scroll all keys down
+  for (int i = 9; i > 0; i--) {
+    strcpy(ctx->matrix_keys[i], ctx->matrix_keys[i-1]);
+  }
+  
+  // Add new key at top
+  snprintf(ctx->matrix_keys[0], 65, "%016llx%016llx%016llx%016llx", 
+           pk[3], pk[2], pk[1], pk[0]);
 }
 
 void ctx_scan_update(ctx_t *ctx, size_t k_checked, const fe current_pk) {
@@ -794,10 +812,13 @@ void ctx_scan_update(ctx_t *ctx, size_t k_checked, const fe current_pk) {
   ctx->k_checked += k_checked;
   ctx->ts_updated = ts;
   
-  // Update display every 50ms for smooth real-time updates (20 FPS)
-  if ((ts - ctx->ts_printed) >= 50) {
+  // Update matrix keys INSTANTLY - no throttling
+  update_matrix_display(ctx, current_pk);
+  
+  // Refresh display every 20ms for super smooth 50 FPS
+  if ((ts - ctx->ts_printed) >= 20) {
     ctx->ts_printed = ts;
-    draw_keyhunt_scanner(ctx, current_pk);
+    draw_matrix_scanner(ctx);
   }
   
   pthread_mutex_unlock(&ctx->lock);
@@ -893,7 +914,6 @@ void batch_scan(ctx_t *ctx, const fe pk, const size_t iterations) {
   fe_clone(ck, pk);
 
   size_t counter = 0;
-  size_t update_counter = 0;
   while (counter < iterations && !ctx->finished) {
     for (size_t i = 0; i < hsize; ++i) fe_modp_sub(dx[i], ctx->gpoints[i].x, GStart.x);
     fe_modp_grpinv(dx, hsize);
@@ -923,12 +943,8 @@ void batch_scan(ctx_t *ctx, const fe pk, const size_t iterations) {
 
     check_found_scan(ctx, ck, bp);
     
-    // Update display with current key - REAL TIME, NO LAG
-    update_counter++;
-    if (update_counter >= 4) { // Update every 4 batches for super smooth display
-      ctx_scan_update(ctx, GROUP_INV_SIZE * 4, ck);
-      update_counter = 0;
-    }
+    // Update display EVERY BATCH - INSTANT, NO LAG!
+    ctx_scan_update(ctx, GROUP_INV_SIZE, ck);
     
     // Stop if key found
     if (ctx->stop_on_found && ctx->k_found > 0) {
@@ -938,11 +954,6 @@ void batch_scan(ctx_t *ctx, const fe pk, const size_t iterations) {
     fe_modn_add_stride(ck, ck, ctx->stride_k, GROUP_INV_SIZE);
     ec_jacobi_addrdc(&GStart, &GStart, &ctx->stride_p);
     counter += GROUP_INV_SIZE;
-  }
-  
-  // Final update with remaining keys
-  if (update_counter > 0) {
-    ctx_scan_update(ctx, GROUP_INV_SIZE * update_counter, ck);
   }
 }
 
@@ -983,6 +994,11 @@ void *cmd_scan_worker(void *arg) {
 void cmd_scan(ctx_t *ctx) {
   ctx->stop_on_found = true; // Always stop when key is found in scan mode
   
+  // Initialize matrix display
+  for (int i = 0; i < 10; i++) {
+    ctx->matrix_keys[i][0] = '\0';
+  }
+  
   // Calculate total range for progress bar
   fe range_size;
   fe_modn_sub(range_size, ctx->range_e, ctx->range_s);
@@ -996,7 +1012,7 @@ void cmd_scan(ctx_t *ctx) {
   ctx->ts_printed = ctx->ts_started;
 
   // Initial display with start key
-  draw_keyhunt_scanner(ctx, ctx->range_s);
+  draw_matrix_scanner(ctx);
 
   for (size_t i = 0; i < ctx->threads_count; ++i) {
     pthread_create(&ctx->threads[i], NULL, cmd_scan_worker, ctx);
@@ -1008,7 +1024,7 @@ void cmd_scan(ctx_t *ctx) {
 
   pthread_mutex_lock(&ctx->lock);
   ctx->finished = true;
-  draw_keyhunt_scanner(ctx, ctx->range_s);
+  draw_matrix_scanner(ctx);
   if (ctx->outfile != NULL) fclose(ctx->outfile);
   pthread_mutex_unlock(&ctx->lock);
 }
