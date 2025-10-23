@@ -66,17 +66,20 @@ typedef struct ctx_t {
   bool has_seed;
   u32 ord_offs; // offset (order) of range to search
   u32 ord_size; // size (span) in range to search
+  bool true_random_mode; // NEW: flag for true random mode (-d 0:0)
 } ctx_t;
 
 void load_filter(ctx_t *ctx, const char *filepath) {
   if (!filepath) {
-    fprintf(stderr, "missing filter file\n");
+    fprintf(stderr, "missing filter file
+");
     exit(1);
   }
 
   FILE *file = fopen(filepath, "rb");
   if (!file) {
-    fprintf(stderr, "failed to open filter file: %s\n", filepath);
+    fprintf(stderr, "failed to open filter file: %s
+", filepath);
     exit(1);
   }
 
@@ -139,7 +142,9 @@ void ctx_print_unlocked(ctx_t *ctx) {
   double it = ctx->k_checked / dt / 1000000;
   term_clear_line();
   fprintf(stderr, "%.2fs ~ %.2f Mkeys/s ~ %'zu / %'zu%s%c", //
-          dt, it, ctx->k_found, ctx->k_checked, msg, ctx->finished ? '\n' : '\r');
+          dt, it, ctx->k_found, ctx->k_checked, msg, ctx->finished ? '
+' : '
+');
   fflush(stderr);
 }
 
@@ -184,13 +189,15 @@ void ctx_write_found(ctx_t *ctx, const char *label, const h160_t hash, const fe 
 
   if (!ctx->quiet) {
     term_clear_line();
-    printf("%s: %08x%08x%08x%08x%08x <- %016llx%016llx%016llx%016llx\n", //
+    printf("%s: %08x%08x%08x%08x%08x <- %016llx%016llx%016llx%016llx
+", //
            label, hash[0], hash[1], hash[2], hash[3], hash[4],           //
            pk[3], pk[2], pk[1], pk[0]);
   }
 
   if (ctx->outfile != NULL) {
-    fprintf(ctx->outfile, "%s\t%08x%08x%08x%08x%08x\t%016llx%016llx%016llx%016llx\n", //
+    fprintf(ctx->outfile, "%s\t%08x%08x%08x%08x%08x\t%016llx%016llx%016llx%016llx
+", //
             label, hash[0], hash[1], hash[2], hash[3], hash[4],                       //
             pk[3], pk[2], pk[1], pk[0]);
     fflush(ctx->outfile);
@@ -254,10 +261,14 @@ void pk_verify_hash(const fe pk, const h160_t hash, bool c, size_t endo) {
 
   bool is_equal = memcmp(h, hash, sizeof(h160_t)) == 0;
   if (!is_equal) {
-    fprintf(stderr, "[!] error: hash mismatch (compressed: %d endo: %zu)\n", c, endo);
-    fprintf(stderr, "pk: %016llx%016llx%016llx%016llx\n", pk[3], pk[2], pk[1], pk[0]);
-    fprintf(stderr, "lh: %08x%08x%08x%08x%08x\n", hash[0], hash[1], hash[2], hash[3], hash[4]);
-    fprintf(stderr, "rh: %08x%08x%08x%08x%08x\n", h[0], h[1], h[2], h[3], h[4]);
+    fprintf(stderr, "[!] error: hash mismatch (compressed: %d endo: %zu)
+", c, endo);
+    fprintf(stderr, "pk: %016llx%016llx%016llx%016llx
+", pk[3], pk[2], pk[1], pk[0]);
+    fprintf(stderr, "lh: %08x%08x%08x%08x%08x
+", hash[0], hash[1], hash[2], hash[3], hash[4]);
+    fprintf(stderr, "rh: %08x%08x%08x%08x%08x
+", h[0], h[1], h[2], h[3], h[4]);
     exit(1);
   }
 }
@@ -335,7 +346,8 @@ void check_found_add(ctx_t *ctx, fe const start_pk, const pe *points) {
 
       for (size_t j = 0; j < HASH_BATCH_SIZE; ++j) {
         // if (ci >= (GROUP_INV_SIZE * 5)) break;
-        // printf(">> %6zu | %6zu ~ %zu\n", ci, ci / 5, (ci % 5) + 1);
+        // printf(">> %6zu | %6zu ~ %zu
+", ci, ci / 5, (ci % 5) + 1);
         if (ctx->check_addr33) check_hash(ctx, true, hs33[j], start_pk, ci / 5, (ci % 5) + 1);
         if (ctx->check_addr65) check_hash(ctx, false, hs65[j], start_pk, ci / 5, (ci % 5) + 1);
         ci += 1;
@@ -516,9 +528,13 @@ void *cmd_mul_worker(void *arg) {
         sha256_final(res, (u8 *)msg, msg_size);
 
         // debug log (do with `-t 1`)
-        // printf("\n%zu %s\n", len, job->lines[i]);
-        // for (int i = 0; i < msg_size; i++) printf("%02x%s", msg[i], i % 16 == 15 ? "\n" : " ");
-        // for (int i = 0; i < 8; i++) printf("%08x%s", res[i], i % 8 == 7 ? "\n" : "");
+        // printf("
+%zu %s
+", len, job->lines[i]);
+        // for (int i = 0; i < msg_size; i++) printf("%02x%s", msg[i], i % 16 == 15 ? "
+" : " ");
+        // for (int i = 0; i < 8; i++) printf("%08x%s", res[i], i % 8 == 7 ? "
+" : "");
 
         pk[i][0] = (u64)res[6] << 32 | res[7];
         pk[i][1] = (u64)res[4] << 32 | res[5];
@@ -551,8 +567,10 @@ void cmd_mul(ctx_t *ctx) {
 
   while (fgets(line, sizeof(line), stdin) != NULL) {
     size_t len = strlen(line);
-    if (len && line[len - 1] == '\n') line[--len] = '\0';
-    if (len && line[len - 1] == '\r') line[--len] = '\0';
+    if (len && line[len - 1] == '
+') line[--len] = '';
+    if (len && line[len - 1] == '
+') line[--len] = '';
     if (len == 0) continue;
 
     strcpy(job->lines[job->count++], line);
@@ -576,6 +594,42 @@ void cmd_mul(ctx_t *ctx) {
 }
 
 // MARK: CMD_RND
+
+// NEW: True random mode worker for -d 0:0
+void *cmd_true_random_worker(void *arg) {
+  ctx_t *ctx = (ctx_t *)arg;
+  
+  fe pk[GROUP_INV_SIZE];
+  pe cp[GROUP_INV_SIZE];
+  
+  while (!ctx->finished) {
+    // Generate completely random private keys across the entire keyspace
+    for (size_t i = 0; i < GROUP_INV_SIZE; ++i) {
+      // Use secure random generation for full 256-bit keyspace
+      fe_rand(pk[i], true);  // Always use secure random (true parameter)
+      
+      // Ensure key is in valid range (1 to n-1)
+      while (fe_is_zero(pk[i]) || fe_cmp(pk[i], FE_P) >= 0) {
+        fe_rand(pk[i], true);
+      }
+    }
+    
+    // Compute public keys in batch
+    for (size_t i = 0; i < GROUP_INV_SIZE; ++i) {
+      ec_gtable_mul(&cp[i], pk[i]);
+    }
+    ec_jacobi_grprdc(cp, GROUP_INV_SIZE);
+    
+    // Check addresses
+    check_found_mul(ctx, pk, cp, GROUP_INV_SIZE);
+    ctx_update(ctx, GROUP_INV_SIZE);
+    
+    // Check for pause
+    ctx_check_paused(ctx);
+  }
+  
+  return NULL;
+}
 
 void gen_random_range(ctx_t *ctx, const fe a, const fe b) {
   fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
@@ -613,62 +667,40 @@ void print_range_mask(fe range_s, u32 bits_size, u32 offset, bool use_color) {
     }
   }
 
-  putchar('\n');
+  putchar('
+');
 }
 
 void cmd_rnd(ctx_t *ctx) {
-  ctx->ord_offs = MIN(ctx->ord_offs, 255 - ctx->ord_size);
-  printf("[RANDOM MODE] offs: %d ~ bits: %d\n\n", ctx->ord_offs, ctx->ord_size);
-
-  // TRUE RANDOM MODE: if user passes -d 0:0 we treat ord_offs==0 and ord_size==0 as
-  // continuous generation of fully random private keys
-  if (ctx->ord_offs == 0 && ctx->ord_size == 0) {
-    printf("[TRUE RANDOM MODE] Generating random private keys continuously...\n");
-    ctx->job_size = MAX_JOB_SIZE;
+  // NEW: Check for true random mode (-d 0:0)
+  if (ctx->true_random_mode) {
+    printf("[TRUE RANDOM MODE] Generating completely random keys across full 256-bit keyspace
+");
+    printf("Press Ctrl+C to stop
+");
+    printf("----------------------------------------
+");
+    
+    ec_gtable_init();
     ctx->ts_started = tsnow();
-
-    while (true) {
-      fe rand_pk;
-      // fe_rand was not declared in some build environments; use fe_rand_range to generate a random field element.
-      // Generate in full field range [FE_ZERO, FE_P) and skip zero.
-      fe_rand_range(rand_pk, FE_ZERO, FE_P, !ctx->has_seed);
-      if (fe_cmp(rand_pk, FE_ZERO) == 0) continue; // avoid zero private key
-
-      // Compute the public key and addresses
-      pe pub;
-      ec_jacobi_mulrdc(&pub, &G1, rand_pk);
-
-      h160_t h33, h65;
-      bool found = false;
-
-      if (ctx->check_addr33) {
-        addr33(h33, &pub);
-        if (ctx_check_hash(ctx, h33)) {
-          ctx_write_found(ctx, "addr33", h33, rand_pk);
-          found = true;
-        }
-      }
-
-      if (!found && ctx->check_addr65) {
-        addr65(h65, &pub);
-        if (ctx_check_hash(ctx, h65)) {
-          ctx_write_found(ctx, "addr65", h65, rand_pk);
-          found = true;
-        }
-      }
-
-      ctx_update(ctx, 1);
-
-      // Stop immediately when key is found
-      if (found) {
-        printf("\n[+] Key found! Stopping true random scan.\n");
-        ctx_finish(ctx);
-        break;
-      }
+    
+    for (size_t i = 0; i < ctx->threads_count; ++i) {
+      pthread_create(&ctx->threads[i], NULL, cmd_true_random_worker, ctx);
     }
-
+    
+    for (size_t i = 0; i < ctx->threads_count; ++i) {
+      pthread_join(ctx->threads[i], NULL);
+    }
+    
+    ctx_finish(ctx);
     return;
   }
+  
+  // Original random mode code
+  ctx->ord_offs = MIN(ctx->ord_offs, 255 - ctx->ord_size);
+  printf("[RANDOM MODE] offs: %d ~ bits: %d
+
+", ctx->ord_offs, ctx->ord_size);
 
   ctx_precompute_gpoints(ctx);
   ctx->job_size = MAX_JOB_SIZE;
@@ -703,7 +735,9 @@ void cmd_rnd(ctx_t *ctx) {
     size_t dc = ctx->k_checked - last_c, df = ctx->k_found - last_f;
     double dt = MAX((tsnow() - s_time), 1ul) / 1000.0;
     term_clear_line();
-    printf("%'zu / %'zu ~ %.1fs\n\n", df, dc, dt);
+    printf("%'zu / %'zu ~ %.1fs
+
+", df, dc, dt);
 
     if (is_full) break;
   }
@@ -723,7 +757,8 @@ void arg_search_range(args_t *args, fe range_s, fe range_e) {
 
   char *sep = strchr(raw, ':');
   if (!sep) {
-    fprintf(stderr, "invalid search range, use format: -r 8000:ffff\n");
+    fprintf(stderr, "invalid search range, use format: -r 8000:ffff
+");
     exit(1);
   }
 
@@ -735,17 +770,20 @@ void arg_search_range(args_t *args, fe range_s, fe range_e) {
   // if (fe_cmp(range_e, FE_P) > 0) fe_clone(range_e, FE_P);
 
   if (fe_cmp64(range_s, GROUP_INV_SIZE) <= 0) {
-    fprintf(stderr, "invalid search range, start <= %#lx\n", GROUP_INV_SIZE);
+    fprintf(stderr, "invalid search range, start <= %#lx
+", GROUP_INV_SIZE);
     exit(1);
   }
 
   if (fe_cmp(range_e, FE_P) > 0) {
-    fprintf(stderr, "invalid search range, end > FE_P\n");
+    fprintf(stderr, "invalid search range, end > FE_P
+");
     exit(1);
   }
 
   if (fe_cmp(range_s, range_e) >= 0) {
-    fprintf(stderr, "invalid search range, start >= end\n");
+    fprintf(stderr, "invalid search range, start >= end
+");
     exit(1);
   }
 }
@@ -762,18 +800,21 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
   if (!raw && ctx->cmd == CMD_RND) {
     ctx->ord_offs = rand64(!ctx->has_seed) % max_offs;
     ctx->ord_size = default_bits;
+    ctx->true_random_mode = false;  // NEW: Initialize flag
     return;
   }
 
   if (!raw) {
     ctx->ord_offs = 0;
     ctx->ord_size = default_bits;
+    ctx->true_random_mode = false;  // NEW: Initialize flag
     return;
   }
 
   char *sep = strchr(raw, ':');
   if (!sep) {
-    fprintf(stderr, "invalid offset:size format, use format: -d 128:32\n");
+    fprintf(stderr, "invalid offset:size format, use format: -d 128:32 or -d 0:0 for true random
+");
     exit(1);
   }
 
@@ -781,21 +822,25 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
   u32 tmp_offs = atoi(raw);
   u32 tmp_size = atoi(sep + 1);
 
-  // TRUE RANDOM MODE: detect -d 0:0 and set ord_offs and ord_size to 0
+  // NEW: Check for true random mode (-d 0:0)
   if (tmp_offs == 0 && tmp_size == 0) {
+    ctx->true_random_mode = true;
     ctx->ord_offs = 0;
     ctx->ord_size = 0;
-    printf("[TRUE RANDOM MODE] Enabled (-d 0:0)\n");
     return;
   }
 
+  ctx->true_random_mode = false;  // NEW: Not in true random mode
+
   if (tmp_offs > 255) {
-    fprintf(stderr, "invalid offset, max is 255\n");
+    fprintf(stderr, "invalid offset, max is 255
+");
     exit(1);
   }
 
   if (tmp_size < MIN_SIZE || tmp_size > MAX_SIZE) {
-    fprintf(stderr, "invalid size, min is %d and max is %d\n", MIN_SIZE, MAX_SIZE);
+    fprintf(stderr, "invalid size, min is %d and max is %d (use -d 0:0 for true random)
+", MIN_SIZE, MAX_SIZE);
     exit(1);
   }
 
@@ -806,27 +851,53 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
 // MARK: main
 
 void usage(const char *name) {
-  printf("Usage: %s <cmd> [-t <threads>] [-f <file>] [-a <addr_type>] [-r <range>]\n", name);
-  printf("v%s ~ https://github.com/vladkens/ecloop\n", VERSION);
-  printf("\nCompute commands:\n");
-  printf("  add             - search in given range with batch addition\n");
-  printf("  mul             - search hex encoded private keys (from stdin)\n");
-  printf("  rnd             - search random range of bits in given range\n");
-  printf("\nCompute options:\n");
-  printf("  -f <file>       - filter file to search (list of hashes or bloom fitler)\n");
-  printf("  -o <file>       - output file to write found keys (default: stdout)\n");
-  printf("  -t <threads>    - number of threads to run (default: 1)\n");
-  printf("  -a <addr_type>  - address type to search: c - addr33, u - addr65 (default: c)\n");
-  printf("  -r <range>      - search range in hex format (example: 8000:ffff, default all)\n");
-  printf("  -d <offs:size>  - bit offset and size for search (example: 128:32, default: 0:32)\n");
-  printf("  -q              - quiet mode (no output to stdout; -o required)\n");
-  printf("  -endo           - use endomorphism (default: false)\n");
-  printf("\nOther commands:\n");
-  printf("  blf-gen         - create bloom filter from list of hex-encoded hash160\n");
-  printf("  blf-check       - check bloom filter for given hex-encoded hash160\n");
-  printf("  bench           - run benchmark of internal functions\n");
-  printf("  bench-gtable    - run benchmark of ecc multiplication (with different table size)\n");
-  printf("\n");
+  printf("Usage: %s <cmd> [-t <threads>] [-f <file>] [-a <addr_type>] [-r <range>]
+", name);
+  printf("v%s ~ https://github.com/vladkens/ecloop
+", VERSION);
+  printf("
+Compute commands:
+");
+  printf("  add             - search in given range with batch addition
+");
+  printf("  mul             - search hex encoded private keys (from stdin)
+");
+  printf("  rnd             - search random range of bits in given range
+");
+  printf("
+Compute options:
+");
+  printf("  -f <file>       - filter file to search (list of hashes or bloom fitler)
+");
+  printf("  -o <file>       - output file to write found keys (default: stdout)
+");
+  printf("  -t <threads>    - number of threads to run (default: 1)
+");
+  printf("  -a <addr_type>  - address type to search: c - addr33, u - addr65 (default: c)
+");
+  printf("  -r <range>      - search range in hex format (example: 8000:ffff, default all)
+");
+  printf("  -d <offs:size>  - bit offset and size for search (example: 128:32, default: 0:32)
+");
+  printf("                    use -d 0:0 for TRUE RANDOM mode (full 256-bit keyspace)
+");  // NEW: Updated help text
+  printf("  -q              - quiet mode (no output to stdout; -o required)
+");
+  printf("  -endo           - use endomorphism (default: false)
+");
+  printf("
+Other commands:
+");
+  printf("  blf-gen         - create bloom filter from list of hex-encoded hash160
+");
+  printf("  blf-check       - check bloom filter for given hex-encoded hash160
+");
+  printf("  bench           - run benchmark of internal functions
+");
+  printf("  bench-gtable    - run benchmark of ecc multiplication (with different table size)
+");
+  printf("
+");
 }
 
 void init(ctx_t *ctx, args_t *args) {
@@ -849,7 +920,8 @@ void init(ctx_t *ctx, args_t *args) {
   }
 
   if (ctx->cmd == CMD_NIL) {
-    if (args_bool(args, "-v")) printf("ecloop v%s\n", VERSION);
+    if (args_bool(args, "-v")) printf("ecloop v%s
+", VERSION);
     else usage(args->argv[0]);
     exit(0);
   }
@@ -870,7 +942,8 @@ void init(ctx_t *ctx, args_t *args) {
   if (outfile) ctx->outfile = fopen(outfile, "a");
 
   if (outfile == NULL && ctx->quiet) {
-    fprintf(stderr, "quiet mode chosen without output file\n");
+    fprintf(stderr, "quiet mode chosen without output file
+");
     exit(1);
   }
 
@@ -907,8 +980,10 @@ void init(ctx_t *ctx, args_t *args) {
   printf("threads: %zu ~ addr33: %d ~ addr65: %d ~ endo: %d | filter: ", //
          ctx->threads_count, ctx->check_addr33, ctx->check_addr65, ctx->use_endo);
 
-  if (ctx->to_find_hashes != NULL) printf("list (%'zu)\n", ctx->to_find_count);
-  else printf("bloom\n");
+  if (ctx->to_find_hashes != NULL) printf("list (%'zu)
+", ctx->to_find_count);
+  else printf("bloom
+");
 
   if (ctx->cmd == CMD_ADD) {
     fe_print("range_s", ctx->range_s);
@@ -919,13 +994,15 @@ void init(ctx_t *ctx, args_t *args) {
     ctx->raw_text = args_bool(args, "-raw");
   }
 
-  printf("----------------------------------------\n");
+  printf("----------------------------------------
+");
 }
 
 void handle_sigint(int sig) {
   fflush(stderr);
   fflush(stdout);
-  printf("\n");
+  printf("
+");
   exit(sig);
 }
 
