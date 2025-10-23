@@ -35,6 +35,7 @@ static volatile bool global_key_found = false;
 void fe_rand(fe x, bool use_entropy);
 void fe_rand_range(fe x, const fe a, const fe b, bool use_entropy);
 size_t fe_bitlen(const fe x);
+u64 rand64(bool use_entropy);
 
 typedef struct ctx_t {
     enum Cmd cmd;
@@ -92,6 +93,65 @@ typedef struct ctx_t {
     u32 ord_offs; // offset (order) of range to search
     u32 ord_size; // size (span) in range to search
 } ctx_t;
+
+// Function implementations
+u64 rand64(bool use_entropy) {
+    if (use_entropy) {
+        u64 result;
+        FILE *f = fopen("/dev/urandom", "rb");
+        if (f) {
+            fread(&result, sizeof(result), 1, f);
+            fclose(f);
+            return result;
+        }
+    }
+    // Fallback to pseudo-random
+    return ((u64)rand() << 32) | rand();
+}
+
+void fe_rand(fe x, bool use_entropy) {
+    if (use_entropy) {
+        // Use system entropy for true randomness
+        for (int i = 0; i < 4; i++) {
+            x[i] = rand64(true);
+        }
+    } else {
+        // Use pseudo-random (seeded)
+        for (int i = 0; i < 4; i++) {
+            x[i] = rand64(false);
+        }
+    }
+    
+    // Ensure the number is within the valid range [1, n-1]
+    fe_modn_reduce(x);
+    if (fe_cmp64(x, 1) < 0) {
+        fe_set64(x, 1);
+    }
+    if (fe_cmp(x, FE_N) >= 0) {
+        fe_modn_sub(x, FE_N, FE_ONE);
+    }
+}
+
+void fe_rand_range(fe x, const fe a, const fe b, bool use_entropy) {
+    fe diff;
+    fe_modn_sub(diff, b, a);
+    
+    // Generate random number in the range [a, b]
+    do {
+        fe_rand(x, use_entropy);
+        fe_modn_mod(x, diff);
+        fe_modn_add(x, x, a);
+    } while (fe_cmp(x, a) < 0 || fe_cmp(x, b) > 0);
+}
+
+size_t fe_bitlen(const fe x) {
+    for (int i = 3; i >= 0; i--) {
+        if (x[i] != 0) {
+            return (i * 64) + (64 - __builtin_clzll(x[i]));
+        }
+    }
+    return 0;
+}
 
 void load_filter(ctx_t *ctx, const char *filepath) {
     if (!filepath) {
@@ -992,7 +1052,7 @@ void usage(const char *name) {
     printf("  blf-gen         - create bloom filter from list of hex-encoded hash160\n");
     printf("  blf-check       - check bloom filter for given hex-encoded hash160\n");
     printf("  bench           - run benchmark of internal functions\n");
-    printf("  bench-gtable    - run benchmark of ecc multiplication (with different table size)\n");
+    printf("  bench-gtable     - run benchmark of ecc multiplication (with different table size)\n");
     printf("\n");
 }
 
