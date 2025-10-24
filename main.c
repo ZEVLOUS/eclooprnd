@@ -700,7 +700,7 @@ void cmd_rnd(ctx_t *ctx) {
   if (ctx->ord_offs == 0 && ctx->ord_size == 0) {
     ctx->true_random_mode = true;
     printf("[TRUE RANDOM MODE] Generating cryptographically secure random keys\n");
-    printf("Using OpenSSL BN_rand_range() for randomness\n");
+    printf("Using OpenSSL BN_rand_range() for randomness\n\n");
 
     fe_print("range_s", ctx->range_s);
     fe_print("range_e", ctx->range_e);
@@ -834,6 +834,13 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
   *sep = 0;
   u32 tmp_offs = atoi(raw);
   u32 tmp_size = atoi(sep + 1);
+
+  // Allow -d 0:0 as special case for true random mode
+  if (tmp_offs == 0 && tmp_size == 0) {
+    ctx->ord_offs = 0;
+    ctx->ord_size = 0;
+    return;
+  }
 
   if (tmp_offs > 255) {
     fprintf(stderr, "invalid offset, max is 255\n");
