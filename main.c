@@ -623,74 +623,20 @@ void print_range_mask(fe range_s, u32 bits_size, u32 offset, bool use_color) {
 
 void *cmd_rnd_true_random_worker(void *arg) {
   ctx_t *ctx = (ctx_t *)arg;
-
-  BIGNUM *bn_range_s = BN_new();
-  BIGNUM *bn_range_e = BN_new();
-  BIGNUM *bn_range_size = BN_new();
-  BIGNUM *bn_random_key = BN_new();
-  BN_CTX *bn_ctx = BN_CTX_new();
-
-  if (!bn_range_s || !bn_range_e || !bn_range_size || !bn_random_key || !bn_ctx) {
-    fprintf(stderr, "Failed to allocate OpenSSL BIGNUMs\n");
-    return NULL;
-  }
-
-  char hex_s[65], hex_e[65];
-  snprintf(hex_s, sizeof(hex_s), "%016llx%016llx%016llx%016llx", 
-           ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
-  snprintf(hex_e, sizeof(hex_e), "%016llx%016llx%016llx%016llx", 
-           ctx->range_e[3], ctx->range_e[2], ctx->range_e[1], ctx->range_e[0]);
-
-  BN_hex2bn(&bn_range_s, hex_s);
-  BN_hex2bn(&bn_range_e, hex_e);
-  BN_sub(bn_range_size, bn_range_e, bn_range_s);
-
-  fe pk[HASH_BATCH_SIZE];
-  pe cp[HASH_BATCH_SIZE];
+  
+  fe random_pk;
+  size_t iterations = MAX_JOB_SIZE;
 
   while (!ctx->finished) {
     ctx_check_paused(ctx);
 
-    for (size_t i = 0; i < HASH_BATCH_SIZE; ++i) {
-      if (!BN_rand_range(bn_random_key, bn_range_size)) {
-        fprintf(stderr, "BN_rand_range failed\n");
-        continue;
-      }
-
-      BN_add(bn_random_key, bn_random_key, bn_range_s);
-
-      char *hex_key = BN_bn2hex(bn_random_key);
-      if (hex_key) {
-        char padded_key[65] = {0};
-        size_t len = strlen(hex_key);
-        if (len < 64) {
-          memset(padded_key, '0', 64 - len);
-          strcat(padded_key, hex_key);
-        } else {
-          strcpy(padded_key, hex_key);
-        }
-
-        sscanf(padded_key, "%016llx%016llx%016llx%016llx",
-               &pk[i][3], &pk[i][2], &pk[i][1], &pk[i][0]);
-
-        OPENSSL_free(hex_key);
-      }
-    }
-
-    for (size_t i = 0; i < HASH_BATCH_SIZE; ++i) {
-      ec_gtable_mul(&cp[i], pk[i]);
-    }
-    ec_jacobi_grprdc(cp, HASH_BATCH_SIZE);
-
-    check_found_mul(ctx, pk, cp, HASH_BATCH_SIZE);
-    ctx_update(ctx, HASH_BATCH_SIZE);
+    // Generate a random starting point
+    fe_rand_range(random_pk, ctx->range_s, ctx->range_e, true);
+    
+    // Use fast batch_add from that random point
+    batch_add(ctx, random_pk, iterations);
+    ctx_update(ctx, ctx->use_endo ? iterations * 6 : iterations);
   }
-
-  BN_free(bn_range_s);
-  BN_free(bn_range_e);
-  BN_free(bn_range_size);
-  BN_free(bn_random_key);
-  BN_CTX_free(bn_ctx);
 
   return NULL;
 }
@@ -699,14 +645,17 @@ void *cmd_rnd_true_random_worker(void *arg) {
 void cmd_rnd(ctx_t *ctx) {
   if (ctx->ord_offs == 0 && ctx->ord_size == 0) {
     ctx->true_random_mode = true;
-    printf("[TRUE RANDOM MODE] Generating cryptographically secure random keys\n");
-    printf("Using OpenSSL BN_rand_range() for randomness\n\n");
+    printf("[TRUE RANDOM MODE] Generating fast random keys\n");
+    printf("Using optimized batch addition with random starting points\n\n");
 
     fe_print("range_s", ctx->range_s);
     fe_print("range_e", ctx->range_e);
     printf("----------------------------------------\n");
 
-    ec_gtable_init();
+    // Use offset 0 for true random (checks every key sequentially in small batches)
+    ctx->ord_offs = 0;
+    ctx_precompute_gpoints(ctx);
+    ctx->job_size = MAX_JOB_SIZE;
     ctx->ts_started = tsnow();
 
     for (size_t i = 0; i < ctx->threads_count; ++i) {
