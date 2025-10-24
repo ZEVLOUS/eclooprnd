@@ -7,6 +7,10 @@
 #include <signal.h>
 #include <unistd.h>
 
+// Add OpenSSL includes for true random mode
+#include <openssl/bn.h>
+#include <openssl/rand.h>
+
 #include "lib/addr.c"
 #include "lib/bench.c"
 #include "lib/ecc.c"
@@ -66,7 +70,7 @@ typedef struct ctx_t {
   bool has_seed;
   u32 ord_offs; // offset (order) of range to search
   u32 ord_size; // size (span) in range to search
-  bool true_random_mode; // NEW: flag for true random mode (-d 0:0)
+  bool true_random_mode; // true random mode flag
 } ctx_t;
 
 void load_filter(ctx_t *ctx, const char *filepath) {
@@ -593,43 +597,99 @@ void cmd_mul(ctx_t *ctx) {
   ctx_finish(ctx);
 }
 
-// MARK: CMD_RND
+// MARK: CMD_RND True Random Mode
 
-// NEW: True random mode worker for -d 0:0
-void *cmd_true_random_worker(void *arg) {
+void *cmd_rnd_true_random_worker(void *arg) {
   ctx_t *ctx = (ctx_t *)arg;
   
-  fe pk[GROUP_INV_SIZE];
-  pe cp[GROUP_INV_SIZE];
+  // Initialize OpenSSL BIGNUMs
+  BIGNUM *bn_range_s = BN_new();
+  BIGNUM *bn_range_e = BN_new();
+  BIGNUM *bn_range_size = BN_new();
+  BIGNUM *bn_random_key = BN_new();
+  BN_CTX *bn_ctx = BN_CTX_new();
+  
+  if (!bn_range_s || !bn_range_e || !bn_range_size || !bn_random_key || !bn_ctx) {
+    fprintf(stderr, "Failed to allocate OpenSSL BIGNUMs
+");
+    return NULL;
+  }
+  
+  // Convert fe range to BIGNUM
+  char hex_s[65], hex_e[65];
+  snprintf(hex_s, sizeof(hex_s), "%016llx%016llx%016llx%016llx", 
+           ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
+  snprintf(hex_e, sizeof(hex_e), "%016llx%016llx%016llx%016llx", 
+           ctx->range_e[3], ctx->range_e[2], ctx->range_e[1], ctx->range_e[0]);
+  
+  BN_hex2bn(&bn_range_s, hex_s);
+  BN_hex2bn(&bn_range_e, hex_e);
+  
+  // Calculate range size (end - start)
+  BN_sub(bn_range_size, bn_range_e, bn_range_s);
+  
+  // Arrays for batch processing
+  fe pk[HASH_BATCH_SIZE];
+  pe cp[HASH_BATCH_SIZE];
   
   while (!ctx->finished) {
-    // Generate completely random private keys across the entire keyspace
-    for (size_t i = 0; i < GROUP_INV_SIZE; ++i) {
-      // Use secure random generation for full 256-bit keyspace
-      fe_rand(pk[i], true);  // Always use secure random (true parameter)
+    ctx_check_paused(ctx);
+    
+    // Generate batch of random keys
+    for (size_t i = 0; i < HASH_BATCH_SIZE; ++i) {
+      // Generate random number in range [0, range_size)
+      if (!BN_rand_range(bn_random_key, bn_range_size)) {
+        fprintf(stderr, "BN_rand_range failed
+");
+        continue;
+      }
       
-      // Ensure key is in valid range (1 to n-1)
-      while (fe_is_zero(pk[i]) || fe_cmp(pk[i], FE_P) >= 0) {
-        fe_rand(pk[i], true);
+      // Add range_start to get key in [range_s, range_e)
+      BN_add(bn_random_key, bn_random_key, bn_range_s);
+      
+      // Convert BIGNUM back to fe
+      char *hex_key = BN_bn2hex(bn_random_key);
+      if (hex_key) {
+        // Pad with zeros if needed
+        char padded_key[65] = {0};
+        size_t len = strlen(hex_key);
+        if (len < 64) {
+          memset(padded_key, '0', 64 - len);
+          strcat(padded_key, hex_key);
+        } else {
+          strcpy(padded_key, hex_key);
+        }
+        
+        // Parse to fe format
+        sscanf(padded_key, "%016llx%016llx%016llx%016llx",
+               &pk[i][3], &pk[i][2], &pk[i][1], &pk[i][0]);
+        
+        OPENSSL_free(hex_key);
       }
     }
     
     // Compute public keys in batch
-    for (size_t i = 0; i < GROUP_INV_SIZE; ++i) {
+    for (size_t i = 0; i < HASH_BATCH_SIZE; ++i) {
       ec_gtable_mul(&cp[i], pk[i]);
     }
-    ec_jacobi_grprdc(cp, GROUP_INV_SIZE);
+    ec_jacobi_grprdc(cp, HASH_BATCH_SIZE);
     
-    // Check addresses
-    check_found_mul(ctx, pk, cp, GROUP_INV_SIZE);
-    ctx_update(ctx, GROUP_INV_SIZE);
-    
-    // Check for pause
-    ctx_check_paused(ctx);
+    // Check hashes
+    check_found_mul(ctx, pk, cp, HASH_BATCH_SIZE);
+    ctx_update(ctx, HASH_BATCH_SIZE);
   }
+  
+  // Cleanup
+  BN_free(bn_range_s);
+  BN_free(bn_range_e);
+  BN_free(bn_range_size);
+  BN_free(bn_random_key);
+  BN_CTX_free(bn_ctx);
   
   return NULL;
 }
+
+// MARK: CMD_RND
 
 void gen_random_range(ctx_t *ctx, const fe a, const fe b) {
   fe_rand_range(ctx->range_s, a, b, !ctx->has_seed);
@@ -672,22 +732,28 @@ void print_range_mask(fe range_s, u32 bits_size, u32 offset, bool use_color) {
 }
 
 void cmd_rnd(ctx_t *ctx) {
-  // NEW: Check for true random mode (-d 0:0)
-  if (ctx->true_random_mode) {
-    printf("[TRUE RANDOM MODE] Generating completely random keys across full 256-bit keyspace
+  // Check if true random mode is enabled (-d 0:0)
+  if (ctx->ord_offs == 0 && ctx->ord_size == 0) {
+    ctx->true_random_mode = true;
+    printf("[TRUE RANDOM MODE] Generating cryptographically secure random keys
 ");
-    printf("Press Ctrl+C to stop
+    printf("Using OpenSSL BN_rand_range() for randomness
 ");
+    
+    fe_print("range_s", ctx->range_s);
+    fe_print("range_e", ctx->range_e);
     printf("----------------------------------------
 ");
     
-    ec_gtable_init();
+    ec_gtable_init(); // Initialize G-table for multiplication
     ctx->ts_started = tsnow();
     
+    // Create worker threads
     for (size_t i = 0; i < ctx->threads_count; ++i) {
-      pthread_create(&ctx->threads[i], NULL, cmd_true_random_worker, ctx);
+      pthread_create(&ctx->threads[i], NULL, cmd_rnd_true_random_worker, ctx);
     }
     
+    // Wait for threads to complete
     for (size_t i = 0; i < ctx->threads_count; ++i) {
       pthread_join(ctx->threads[i], NULL);
     }
@@ -696,7 +762,7 @@ void cmd_rnd(ctx_t *ctx) {
     return;
   }
   
-  // Original random mode code
+  // Original rnd mode code continues here
   ctx->ord_offs = MIN(ctx->ord_offs, 255 - ctx->ord_size);
   printf("[RANDOM MODE] offs: %d ~ bits: %d
 
@@ -800,20 +866,18 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
   if (!raw && ctx->cmd == CMD_RND) {
     ctx->ord_offs = rand64(!ctx->has_seed) % max_offs;
     ctx->ord_size = default_bits;
-    ctx->true_random_mode = false;  // NEW: Initialize flag
     return;
   }
 
   if (!raw) {
     ctx->ord_offs = 0;
     ctx->ord_size = default_bits;
-    ctx->true_random_mode = false;  // NEW: Initialize flag
     return;
   }
 
   char *sep = strchr(raw, ':');
   if (!sep) {
-    fprintf(stderr, "invalid offset:size format, use format: -d 128:32 or -d 0:0 for true random
+    fprintf(stderr, "invalid offset:size format, use format: -d 128:32
 ");
     exit(1);
   }
@@ -822,16 +886,6 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
   u32 tmp_offs = atoi(raw);
   u32 tmp_size = atoi(sep + 1);
 
-  // NEW: Check for true random mode (-d 0:0)
-  if (tmp_offs == 0 && tmp_size == 0) {
-    ctx->true_random_mode = true;
-    ctx->ord_offs = 0;
-    ctx->ord_size = 0;
-    return;
-  }
-
-  ctx->true_random_mode = false;  // NEW: Not in true random mode
-
   if (tmp_offs > 255) {
     fprintf(stderr, "invalid offset, max is 255
 ");
@@ -839,7 +893,7 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
   }
 
   if (tmp_size < MIN_SIZE || tmp_size > MAX_SIZE) {
-    fprintf(stderr, "invalid size, min is %d and max is %d (use -d 0:0 for true random)
+    fprintf(stderr, "invalid size, min is %d and max is %d
 ", MIN_SIZE, MAX_SIZE);
     exit(1);
   }
@@ -879,8 +933,8 @@ Compute options:
 ");
   printf("  -d <offs:size>  - bit offset and size for search (example: 128:32, default: 0:32)
 ");
-  printf("                    use -d 0:0 for TRUE RANDOM mode (full 256-bit keyspace)
-");  // NEW: Updated help text
+  printf("                    use -d 0:0 for true random mode with OpenSSL
+");
   printf("  -q              - quiet mode (no output to stdout; -o required)
 ");
   printf("  -endo           - use endomorphism (default: false)
