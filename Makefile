@@ -4,7 +4,7 @@ CC = cc
 CC_FLAGS ?= -O3 -ffast-math -Wall -Wextra
 
 ifeq ($(shell uname -m),x86_64)
-\tCC_FLAGS += -march=native -pthread -lpthread
+CC_FLAGS += -march=native -pthread -lpthread
 endif
 
 # Add OpenSSL libraries for true random mode
