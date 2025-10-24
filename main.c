@@ -835,6 +835,13 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
   u32 tmp_offs = atoi(raw);
   u32 tmp_size = atoi(sep + 1);
 
+  // Special case: -d 0:0 enables true random mode
+  if (tmp_offs == 0 && tmp_size == 0) {
+    ctx->ord_offs = 0;
+    ctx->ord_size = 0;
+    return;
+  }
+
   if (tmp_offs > 255) {
     fprintf(stderr, "invalid offset, max is 255\n");
     exit(1);

@@ -13,56 +13,52 @@ CC_FLAGS += -lssl -lcrypto
 default: build
 
 clean:
-\t@rm -rf ecloop bench main a.out *.profraw *.profdata
+	@rm -rf ecloop bench main a.out *.profraw *.profdata
 
 build: clean
-\t$(CC) $(CC_FLAGS) main.c -o ecloop
+	$(CC) $(CC_FLAGS) main.c -o ecloop
 
 bench: build
-\t./ecloop bench
+	./ecloop bench
 
 fmt:
-\t@find . -name '*.c' | xargs clang-format -i
+	@find . -name '*.c' | xargs clang-format -i
 
 # -----------------------------------------------------------------------------
 
 add: build
-\t./ecloop add -f data/btc-puzzles-hash -r 8000:ffffff
+	./ecloop add -f data/btc-puzzles-hash -r 8000:ffffff
 
 mul: build
-\tcat data/btc-bw-priv | ./ecloop mul -f data/btc-bw-hash -a cu -q -o /dev/null
+	cat data/btc-bw-priv | ./ecloop mul -f data/btc-bw-hash -a cu -q -o /dev/null
 
 rnd: build
-\t./ecloop rnd -f data/btc-puzzles-hash -r 800000000000000000:ffffffffffffffffff -d 0:32
+	./ecloop rnd -f data/btc-puzzles-hash -r 800000000000000000:ffffffffffffffffff -d 0:32
 
 # Add true random mode test
 rnd-true: build
-\t./ecloop rnd -f data/btc-puzzles-hash -r 800000000000000000:ffffffffffffffffff -d 0:0 -t 4
+	./ecloop rnd -f data/btc-puzzles-hash -r 800000000000000000:ffffffffffffffffff -d 0:0 -t 4
 
 blf: build
-\t@rm -rf /tmp/test.blf
-\t@printf "
-> "
-\tcat data/btc-puzzles-hash | ./ecloop blf-gen -n 32768 -o /tmp/test.blf
-\t@printf "
-> "
-\tcat data/btc-bw-hash | ./ecloop blf-gen -n 32768 -o /tmp/test.blf
-\t@printf "
-> "
-\t./ecloop add -f /tmp/test.blf -r 8000:ffffff -q -o /dev/null
-\t@printf "
-> "
-\tcat data/btc-bw-priv | ./ecloop mul -f /tmp/test.blf -a cu -q -o /dev/null
+	@rm -rf /tmp/test.blf
+	@printf "\n> "
+	cat data/btc-puzzles-hash | ./ecloop blf-gen -n 32768 -o /tmp/test.blf
+	@printf "\n> "
+	cat data/btc-bw-hash | ./ecloop blf-gen -n 32768 -o /tmp/test.blf
+	@printf "\n> "
+	./ecloop add -f /tmp/test.blf -r 8000:ffffff -q -o /dev/null
+	@printf "\n> "
+	cat data/btc-bw-priv | ./ecloop mul -f /tmp/test.blf -a cu -q -o /dev/null
 
 verify: build
-\t./ecloop mult-verify
+	./ecloop mult-verify
 
 # -----------------------------------------------------------------------------
 
 range_72 = 800000000000000000:ffffffffffffffffff
 
 puzzle: build
-\t./ecloop rnd -f data/btc-puzzles-hash -d 0:32 -r $(range_72) -o found_72.txt
+	./ecloop rnd -f data/btc-puzzles-hash -d 0:32 -r $(range_72) -o found_72.txt
 
 puzzle-true: build
-\t./ecloop rnd -f data/btc-puzzles-hash -d 0:0 -r $(range_72) -o found_72.txt
+	./ecloop rnd -f data/btc-puzzles-hash -d 0:0 -r $(range_72) -o found_72.txt
