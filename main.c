@@ -805,7 +805,7 @@ void arg_search_range(args_t *args, fe range_s, fe range_e) {
 }
 
 void load_offs_size(ctx_t *ctx, args_t *args) {
-  const u32 MIN_SIZE = 20;
+  const u32 MIN_SIZE = 0;
   const u32 MAX_SIZE = 64;
 
   u32 range_bits = fe_bitlen(ctx->range_e);
