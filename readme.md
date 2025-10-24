@@ -2,7 +2,7 @@
 
 Searches for Bitcoin private keys by computing public keys on the secp256k1 curve
 Can search within specific ranges or randomly
-Includes a true random mode (using -d 0:0) with OpenSSL's cryptographically secure RNG
+Includes a true random mode (using -d 0:1) with OpenSSL's cryptographically secure RNG
 Supports multi-threading and various optimizations (SIMD, SHA extensions, etc.)
 Used for Bitcoin puzzle challenges Discuss on [bitcointalk.org](https://bitcointalk.org/index.php?topic=5544649.0).
 
@@ -10,7 +10,7 @@ Used for Bitcoin puzzle challenges Discuss on [bitcointalk.org](https://bitcoint
 
 ## Features
 
-- Added true random mode -d 0:0
+- Added true random mode -d 0:1
 - Fixed 256-bit modular arithmetic
 - Group inversion for point addition operations
 - Precomputed tables for point multiplication
