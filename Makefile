@@ -7,6 +7,8 @@ ifeq ($(shell uname -m),x86_64)
 CC_FLAGS += -march=native -pthread -lpthread
 endif
 
+CC_FLAGS += -lssl -lcrypto
+
 # Add OpenSSL libraries for true random mode
 CC_FLAGS += -lssl -lcrypto
 
