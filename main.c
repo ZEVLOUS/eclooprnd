@@ -814,8 +814,9 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
 
   char *raw = arg_str(args, "-d");
   if (!raw && ctx->cmd == CMD_RND) {
-    ctx->ord_offs = rand64(!ctx->has_seed) % max_offs;
-    ctx->ord_size = default_bits;
+    // Default to true random mode (0:0) for rnd command
+    ctx->ord_offs = 0;
+    ctx->ord_size = 0;
     return;
   }
 
@@ -871,8 +872,9 @@ void usage(const char *name) {
   printf("  -t <threads>    - number of threads to run (default: 1)\n");
   printf("  -a <addr_type>  - address type to search: c - addr33, u - addr65 (default: c)\n");
   printf("  -r <range>      - search range in hex format (example: 8000:ffff, default all)\n");
-  printf("  -d <offs:size>  - bit offset and size for search (example: 128:32, default: 0:32)\n");
-  printf("                    use -d 0:0 for true random mode with OpenSSL\n");
+  printf("  -d <offs:size>  - bit offset and size for search (example: 128:32)\n");
+  printf("                    default for 'rnd' command: 0:0 (true random mode with OpenSSL)\n");
+  printf("                    for chunk scanning, specify offset and size (e.g., -d 128:32)\n");
   printf("  -q              - quiet mode (no output to stdout; -o required)\n");
   printf("  -endo           - use endomorphism (default: false)\n");
   printf("\nOther commands:\n");

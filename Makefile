@@ -13,7 +13,7 @@ clean:
 	@rm -rf ecloop bench main a.out *.profraw *.profdata
 
 build: clean
-	$(CC) $(CC_FLAGS) main.c -o ecloop
+	$(CC) $(CC_FLAGS) main.c -o ecloop -lcrypto -lssl
 
 bench: build
 	./ecloop bench
