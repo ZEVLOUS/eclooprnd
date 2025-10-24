@@ -1,12 +1,16 @@
 ## eclooprnd
 
-A high-performance, CPU-optimized tool for computing public keys on the secp256k1 elliptic curve. It includes features for searching both compressed and uncompressed public keys, with customizable search parameters. Discuss on [bitcointalk.org](https://bitcointalk.org/index.php?topic=5544649.0).
+Searches for Bitcoin private keys by computing public keys on the secp256k1 curve
+Can search within specific ranges or randomly
+Includes a true random mode (using -d 0:0) with OpenSSL's cryptographically secure RNG
+Supports multi-threading and various optimizations (SIMD, SHA extensions, etc.)
+Used for Bitcoin puzzle challenges Discuss on [bitcointalk.org](https://bitcointalk.org/index.php?topic=5544649.0).
 
 [<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
 
 ## Features
 
-- Added true random mode -d 0:0 
+- Added true random mode -d 0:0
 - Fixed 256-bit modular arithmetic
 - Group inversion for point addition operations
 - Precomputed tables for point multiplication
@@ -20,7 +24,7 @@ A high-performance, CPU-optimized tool for computing public keys on the secp256k
 ## Build
 
 ```sh
-git clone https://github.com/zevlous/eclooprnd.git && cd ecloop
+git clone https://github.com/zevlous/eclooprnd.git && cd eclooprnd
 make build
 ```
 
@@ -183,7 +187,7 @@ Here are the steps I followed to run `ecloop` on Windows:
 4. Run `wsl --install Ubuntu` (this command hung when I tried it, so I continued in a new tab)
 5. Run `wsl -d Ubuntu`
 6. Run: `sudo apt update && sudo apt install -y build-essential git clang`
-7. Run `cd ~ && git clone https://github.com/zevlous/eclooprnd.git && cd ecloop`
+7. Run `cd ~ && git clone https://github.com/zevlous/eclooprnd.git && cd eclooprnd`
 8. Run `make build`
 
 If no errors appear, `ecloop` has been compiled successfully and is ready to use. For example, you can run a benchmark with: `./ecloop bench`.
