@@ -6,9 +6,6 @@
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
-// Add OpenSSL includes for true random mode
-#include <openssl/bn.h>
-#include <openssl/rand.h>
 
 #include "lib/addr.c"
 #include "lib/bench.c"
@@ -68,8 +65,7 @@ typedef struct ctx_t {
   // cmd rnd
   bool has_seed;
   u32 ord_offs; // offset (order) of range to search
-  u32 ord_size;
-  bool true_random_mode; // size (span) in range to search
+  u32 ord_size; // size (span) in range to search
 } ctx_t;
 
 void load_filter(ctx_t *ctx, const char *filepath) {
@@ -620,146 +616,58 @@ void print_range_mask(fe range_s, u32 bits_size, u32 offset, bool use_color) {
   putchar('\n');
 }
 
-
-void *cmd_rnd_true_random_worker(void *arg) {
-  ctx_t *ctx = (ctx_t *)arg;
-
-  BIGNUM *bn_range_s = BN_new();
-  BIGNUM *bn_range_e = BN_new();
-  BIGNUM *bn_range_size = BN_new();
-  BIGNUM *bn_random_key = BN_new();
-  BN_CTX *bn_ctx = BN_CTX_new();
-
-  if (!bn_range_s || !bn_range_e || !bn_range_size || !bn_random_key || !bn_ctx) {
-    fprintf(stderr, "Failed to allocate OpenSSL BIGNUMs\n");
-    return NULL;
-  }
-
-  char hex_s[65], hex_e[65];
-  snprintf(hex_s, sizeof(hex_s), "%016llx%016llx%016llx%016llx", 
-           ctx->range_s[3], ctx->range_s[2], ctx->range_s[1], ctx->range_s[0]);
-  snprintf(hex_e, sizeof(hex_e), "%016llx%016llx%016llx%016llx", 
-           ctx->range_e[3], ctx->range_e[2], ctx->range_e[1], ctx->range_e[0]);
-
-  BN_hex2bn(&bn_range_s, hex_s);
-  BN_hex2bn(&bn_range_e, hex_e);
-  BN_sub(bn_range_size, bn_range_e, bn_range_s);
-
-  fe pk[HASH_BATCH_SIZE];
-  pe cp[HASH_BATCH_SIZE];
-
-  while (!ctx->finished) {
-    ctx_check_paused(ctx);
-
-    for (size_t i = 0; i < HASH_BATCH_SIZE; ++i) {
-      if (!BN_rand_range(bn_random_key, bn_range_size)) {
-        fprintf(stderr, "BN_rand_range failed\n");
-        continue;
-      }
-
-      BN_add(bn_random_key, bn_random_key, bn_range_s);
-
-      char *hex_key = BN_bn2hex(bn_random_key);
-      if (hex_key) {
-        char padded_key[65] = {0};
-        size_t len = strlen(hex_key);
-        if (len < 64) {
-          memset(padded_key, '0', 64 - len);
-          strcat(padded_key, hex_key);
-        } else {
-          strcpy(padded_key, hex_key);
-        }
-
-        sscanf(padded_key, "%016llx%016llx%016llx%016llx",
-               &pk[i][3], &pk[i][2], &pk[i][1], &pk[i][0]);
-
-        OPENSSL_free(hex_key);
-      }
-    }
-
-    for (size_t i = 0; i < HASH_BATCH_SIZE; ++i) {
-      ec_gtable_mul(&cp[i], pk[i]);
-    }
-    ec_jacobi_grprdc(cp, HASH_BATCH_SIZE);
-
-    check_found_mul(ctx, pk, cp, HASH_BATCH_SIZE);
-    ctx_update(ctx, HASH_BATCH_SIZE);
-  }
-
-  BN_free(bn_range_s);
-  BN_free(bn_range_e);
-  BN_free(bn_range_size);
-  BN_free(bn_random_key);
-  BN_CTX_free(bn_ctx);
-
-  return NULL;
-}
-
-
 void cmd_rnd(ctx_t *ctx) {
-  if (ctx->ord_offs == 0 && ctx->ord_size == 0) {
-    ctx->true_random_mode = true;
-    printf("[TRUE RANDOM MODE] Generating cryptographically secure random keys\n");
-    printf("Using OpenSSL BN_rand_range() for randomness\n\n");
+  // Keyhunt-style random mode implementation
+  // Generates random starting points with minimal sequential scanning
 
-    fe_print("range_s", ctx->range_s);
-    fe_print("range_e", ctx->range_e);
-    printf("----------------------------------------\n");
-
-    ec_gtable_init();
-    ctx->ts_started = tsnow();
-
-    for (size_t i = 0; i < ctx->threads_count; ++i) {
-      pthread_create(&ctx->threads[i], NULL, cmd_rnd_true_random_worker, ctx);
-    }
-
-    for (size_t i = 0; i < ctx->threads_count; ++i) {
-      pthread_join(ctx->threads[i], NULL);
-    }
-
-    ctx_finish(ctx);
-    return;
-  }
-
-  ctx->ord_offs = MIN(ctx->ord_offs, 255 - ctx->ord_size);
-  printf("[RANDOM MODE] offs: %d ~ bits: %d\n\n", ctx->ord_offs, ctx->ord_size);
+  printf("[KEYHUNT-STYLE RANDOM MODE]\n");
+  printf("Frequent random jumps with minimal sequential scanning\n\n");
 
   ctx_precompute_gpoints(ctx);
-  ctx->job_size = MAX_JOB_SIZE;
-  ctx->ts_started = tsnow(); // actual start time
+
+  // Use very small job size for maximum randomness
+  // Each thread checks only a tiny sequential batch before jumping
+  ctx->job_size = ctx->use_endo ? 64 : 32;  // Very small batches
+  ctx->ts_started = tsnow();
 
   fe range_s, range_e;
   fe_clone(range_s, ctx->range_s);
   fe_clone(range_e, ctx->range_e);
 
-  size_t last_c = 0, last_f = 0, s_time = 0;
+  // Main random loop
   while (true) {
-    last_c = ctx->k_checked;
-    last_f = ctx->k_found;
-    s_time = tsnow();
+    ctx_check_paused(ctx);
 
+    // Generate a NEW random starting point for each iteration
+    // This is the key to keyhunt's approach
     gen_random_range(ctx, range_s, range_e);
-    print_range_mask(ctx->range_s, ctx->ord_size, ctx->ord_offs, ctx->use_color);
-    print_range_mask(ctx->range_e, ctx->ord_size, ctx->ord_offs, ctx->use_color);
-    ctx_print_status(ctx);
 
-    // if full range is used, skip break after first iteration
-    bool is_full = fe_cmp(ctx->range_s, range_s) == 0 && fe_cmp(ctx->range_e, range_e) == 0;
-
-    for (size_t i = 0; i < ctx->threads_count; ++i) {
-      pthread_create(&ctx->threads[i], NULL, cmd_add_worker, ctx);
-    }
-
-    for (size_t i = 0; i < ctx->threads_count; ++i) {
-      pthread_join(ctx->threads[i], NULL);
-    }
-
-    size_t dc = ctx->k_checked - last_c, df = ctx->k_found - last_f;
-    double dt = MAX((tsnow() - s_time), 1ul) / 1000.0;
+    // Status update every iteration to show we're jumping around
     term_clear_line();
-    printf("%'zu / %'zu ~ %.1fs\n\n", df, dc, dt);
+    printf("\r[Random Jump] ");
+    print_range_mask(ctx->range_s, ctx->ord_size, ctx->ord_offs, ctx->use_color);
+    fflush(stdout);
 
-    if (is_full) break;
+    // Process this small random batch with all threads
+    // Each thread gets a tiny piece of the sequential space
+    pthread_t threads[ctx->threads_count];
+
+    for (size_t i = 0; i < ctx->threads_count; ++i) {
+      pthread_create(&threads[i], NULL, cmd_add_worker, ctx);
+    }
+
+    // Wait for all threads to finish this tiny batch
+    for (size_t i = 0; i < ctx->threads_count; ++i) {
+      pthread_join(threads[i], NULL);
+    }
+
+    // Immediately jump to next random location
+    // No waiting, no large sequential scans
+
+    // Print status periodically
+    if (tsnow() - ctx->ts_printed >= 5000) {
+      ctx_print_status(ctx);
+    }
   }
 
   ctx_finish(ctx);
@@ -805,7 +713,7 @@ void arg_search_range(args_t *args, fe range_s, fe range_e) {
 }
 
 void load_offs_size(ctx_t *ctx, args_t *args) {
-  const u32 MIN_SIZE = 20;
+  const u32 MIN_SIZE = 1;  // Keyhunt-style: allow very small batches
   const u32 MAX_SIZE = 64;
 
   u32 range_bits = fe_bitlen(ctx->range_e);
@@ -834,13 +742,6 @@ void load_offs_size(ctx_t *ctx, args_t *args) {
   *sep = 0;
   u32 tmp_offs = atoi(raw);
   u32 tmp_size = atoi(sep + 1);
-
-  // Allow -d 0:0 as special case for true random mode
-  if (tmp_offs == 0 && tmp_size == 0) {
-    ctx->ord_offs = 0;
-    ctx->ord_size = 0;
-    return;
-  }
 
   if (tmp_offs > 255) {
     fprintf(stderr, "invalid offset, max is 255\n");
@@ -872,7 +773,6 @@ void usage(const char *name) {
   printf("  -a <addr_type>  - address type to search: c - addr33, u - addr65 (default: c)\n");
   printf("  -r <range>      - search range in hex format (example: 8000:ffff, default all)\n");
   printf("  -d <offs:size>  - bit offset and size for search (example: 128:32, default: 0:32)\n");
-  printf("                    use -d 0:0 for true random mode with OpenSSL\n");
   printf("  -q              - quiet mode (no output to stdout; -o required)\n");
   printf("  -endo           - use endomorphism (default: false)\n");
   printf("\nOther commands:\n");
